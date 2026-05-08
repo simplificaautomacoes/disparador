@@ -215,6 +215,15 @@ class Database:
             conn.commit()
             conn.close()
 
+    def delete_sender(self, sender_id):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sender_dialogs WHERE sender_id = ?", (sender_id,))
+            cursor.execute("DELETE FROM senders WHERE id = ?", (sender_id,))
+            conn.commit()
+            conn.close()
+
     def add_dialog(self, sender_id, dialog_id):
         with self.lock:
             conn = self._get_conn()

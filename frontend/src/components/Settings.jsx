@@ -68,6 +68,16 @@ const Settings = ({ token }) => {
         }
     };
 
+    const deleteSender = async (id) => {
+        if (!confirm("Tem certeza que deseja excluir este remetente completamente?")) return;
+        try {
+            await axios.delete(`/api/senders/${id}`);
+            fetchConfig(); // Recarrega os remetentes
+        } catch (err) {
+            alert("Erro ao excluir remetente: " + (err.response?.data?.detail || err.message));
+        }
+    };
+
     if (loading) return <div>Carregando...</div>;
 
     return (
@@ -133,15 +143,24 @@ const Settings = ({ token }) => {
                                 </h3>
                                 <p className="text-gray-500 font-mono text-sm mt-1">{id}</p>
                             </div>
-                            <label className="relative inline-flex items-center cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    className="sr-only peer"
-                                    checked={info.status === 'ativado'}
-                                    onChange={() => toggleStatus(id)}
-                                />
-                                <div className="w-11 h-6 bg-dark-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-lime-500"></div>
-                            </label>
+                            <div className="flex items-center gap-4">
+                                <button
+                                    onClick={() => deleteSender(id)}
+                                    className="text-red-500 hover:text-red-400 p-2 rounded-full hover:bg-dark-700 transition-colors"
+                                    title="Excluir Remetente"
+                                >
+                                    <Trash2 size={20} />
+                                </button>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        className="sr-only peer"
+                                        checked={info.status === 'ativado'}
+                                        onChange={() => toggleStatus(id)}
+                                    />
+                                    <div className="w-11 h-6 bg-dark-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-lime-500"></div>
+                                </label>
+                            </div>
                         </div>
 
                         <div className="bg-dark-900 rounded-lg p-4">

@@ -269,6 +269,14 @@ def add_sender(sender: dict, current_user: dict = Depends(get_current_user)):
     
     return {"message": "Remetente adicionado"}
 
+@app.delete("/senders/{sender_id}")
+def delete_sender(sender_id: str, current_user: dict = Depends(get_current_user)):
+    global_db.delete_sender(sender_id)
+    # Reload config in all active services so subsequent pushes grab new statuses
+    for svc in user_services.values():
+        svc.reload_config()
+    return {"message": "Remetente removido com sucesso"}
+
 @app.get("/history")
 def get_history(current_user: dict = Depends(get_current_user)):
     return global_db.get_history_stats()
