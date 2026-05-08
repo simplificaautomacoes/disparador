@@ -54,14 +54,15 @@ def init_master_user():
     master_email = os.getenv("MASTER_EMAIL", "simplificaautomacoes@gmail.com")
     master_password = os.getenv("MASTER_PASSWORD", "123456")
     
-    if master_email not in users:
+    # Atualiza ou cria o usuário master se ele não existir ou se a senha do painel for diferente
+    if master_email not in users or not verify_password(master_password, users[master_email]["hashed_password"]):
         users[master_email] = {
             "email": master_email,
             "hashed_password": get_password_hash(master_password),
             "role": "admin"
         }
         save_users(users)
-        print(f"Master user {master_email} created.")
+        print(f"Master user {master_email} configured from environment.")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
