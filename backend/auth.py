@@ -51,15 +51,17 @@ def save_users(users):
 
 def init_master_user():
     users = load_users()
-    if "simplificaautomacoes@gmail.com" not in users:
-        users["simplificaautomacoes@gmail.com"] = {
-            "email": "simplificaautomacoes@gmail.com",
-            # Hashed "123456"
-            "hashed_password": get_password_hash("123456"),
+    master_email = os.getenv("MASTER_EMAIL", "simplificaautomacoes@gmail.com")
+    master_password = os.getenv("MASTER_PASSWORD", "123456")
+    
+    if master_email not in users:
+        users[master_email] = {
+            "email": master_email,
+            "hashed_password": get_password_hash(master_password),
             "role": "admin"
         }
         save_users(users)
-        print("Master user created.")
+        print(f"Master user {master_email} created.")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
