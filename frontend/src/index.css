@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    @apply bg-dark-900 text-white antialiased transition-colors duration-300;
+}
+
+/* Light mode overrides */
+.light-mode,
+body.light-mode {
+    background-color: #f3f4f6 !important;
+    color: #111827 !important;
+}
+
+.light-mode .bg-dark-900 {
+    background-color: #f3f4f6 !important;
+}
+
+.light-mode .bg-dark-800 {
+    background-color: #ffffff !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    border-color: #e5e7eb !important;
+}
+
+.light-mode .bg-dark-700 {
+    background-color: #e5e7eb !important;
+    border-color: #d1d5db !important;
+}
+
+.light-mode .border-dark-700 {
+    border-color: #e5e7eb !important;
+}
+
+.light-mode .text-white {
+    color: #111827 !important;
+}
+
+.light-mode .text-gray-500 {
+    color: #6b7280 !important;
+}
+
+.light-mode .text-gray-400 {
+    color: #4b5563 !important;
+}
+
+.light-mode .text-gray-300 {
+    color: #374151 !important;
+}
+
+.light-mode .border-white\/10 {
+    border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.light-mode .hover\:bg-dark-700:hover {
+    background-color: #d1d5db !important;
+    color: #111827 !important;
+}
+
+/* Preserve specific colors */
+.light-mode .text-lime-300 {
+    color: #166534 !important;
+}
+
+.light-mode .text-lime-400 {
+    color: #15803d !important;
+}
+
+.light-mode .text-lime-500\/70 {
+    color: #15803d !important;
+    opacity: 0.8 !important;
+}
+
+.light-mode .text-lime-400\/80 {
+    color: #15803d !important;
+}
+
+.light-mode .text-gray-200 {
+    color: #1f2937 !important;
+}
+
+.light-mode .text-yellow-200\/90 {
+    color: #b45309 !important;
+}
+
+.light-mode .text-yellow-400 {
+    color: #b45309 !important;
+}
+
+.light-mode .bg-dark-800\/40 {
+    background-color: #f9fafb !important;
+    border-color: #e5e7eb !important;
+}
+
+.light-mode .text-red-400 {
+    color: #dc2626 !important;
+}
+
+.light-mode .text-red-500 {
+    color: #ef4444 !important;
+}
+
+.light-mode .border-lime-500\/20 {
+    border-color: rgba(21, 128, 61, 0.2) !important;
+}
+
+/* Custom scrollbar for dark mode */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1e1e1e;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #2d2d2d;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Light mode scrollbar overrides */
+.light-mode ::-webkit-scrollbar-track {
+    background: #e5e7eb;
+}
+
+.light-mode ::-webkit-scrollbar-thumb {
+    background: #9ca3af;
+}
+
+.light-mode ::-webkit-scrollbar-thumb:hover {
+    background: #6b7280;
+}
