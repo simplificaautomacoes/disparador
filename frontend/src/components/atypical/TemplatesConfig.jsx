@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Save, Plus, Trash2, Tag } from 'lucide-react';
+import { Plus, Trash2, Tag } from 'lucide-react';
 
 const TemplatesConfig = () => {
     const [templates, setTemplates] = useState([]);
     const [senders, setSenders] = useState({});
     const [loading, setLoading] = useState(true);
-    const [newTemplate, setNewTemplate] = useState({ sender_id: '', dialog_id: '', label: '' });
+    const [newTemplate, setNewTemplate] = useState({ sender_id: '', dialog_id: '' });
 
     useEffect(() => { fetchData(); }, []);
 
@@ -23,10 +23,10 @@ const TemplatesConfig = () => {
     };
 
     const addTemplate = async () => {
-        if (!newTemplate.sender_id || !newTemplate.dialog_id) return alert('Preencha ID do remetente e diálogo');
+        if (!newTemplate.sender_id || !newTemplate.dialog_id) return alert('Preencha o remetente e o ID do diálogo');
         try {
-            await axios.post('/api/atypical/templates', newTemplate);
-            setNewTemplate({ sender_id: '', dialog_id: '', label: '' });
+            await axios.post('/api/atypical/templates', { ...newTemplate, label: '' });
+            setNewTemplate({ sender_id: '', dialog_id: '' });
             fetchData();
         } catch (err) { alert('Erro: ' + (err.response?.data?.detail || err.message)); }
     };
@@ -49,12 +49,17 @@ const TemplatesConfig = () => {
 
     return (
         <div className="space-y-6">
-            {/* Adicionar template */}
             <div className="bg-dark-800 rounded-xl border border-dark-700 p-6">
+                <p className="text-gray-400 text-sm mb-5">
+                    Configure aqui o <strong className="text-white">diálogo atípico</strong> de cada remetente. 
+                    Esses diálogos são diferentes dos usados no disparador principal. 
+                    O nome do banco/produto (ex: Handmais, Fintech) será definido na hora de criar cada disparo.
+                </p>
+
                 <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
-                    <Plus size={20} className="text-lime-500" /> Novo Template Atípico
+                    <Plus size={20} className="text-lime-500" /> Adicionar Remetente Atípico
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <select
                         value={newTemplate.sender_id}
                         onChange={e => setNewTemplate(p => ({ ...p, sender_id: e.target.value }))}
@@ -66,15 +71,9 @@ const TemplatesConfig = () => {
                         ))}
                     </select>
                     <input
-                        placeholder="ID do Diálogo"
+                        placeholder="ID do Diálogo Atípico"
                         value={newTemplate.dialog_id}
                         onChange={e => setNewTemplate(p => ({ ...p, dialog_id: e.target.value }))}
-                        className="bg-dark-900 border border-dark-700 text-white p-3 rounded-lg focus:outline-none focus:border-lime-500"
-                    />
-                    <input
-                        placeholder="Label (ex: Handmais)"
-                        value={newTemplate.label}
-                        onChange={e => setNewTemplate(p => ({ ...p, label: e.target.value }))}
                         className="bg-dark-900 border border-dark-700 text-white p-3 rounded-lg focus:outline-none focus:border-lime-500"
                     />
                     <button onClick={addTemplate} className="bg-lime-500 hover:bg-lime-600 text-dark-900 px-6 py-3 rounded-lg font-bold transition-colors">
@@ -88,8 +87,8 @@ const TemplatesConfig = () => {
                 {templates.length === 0 && (
                     <div className="text-gray-500 text-center py-12 bg-dark-800 rounded-xl border border-dark-700">
                         <Tag size={48} className="mx-auto mb-3 opacity-30" />
-                        <p>Nenhum template atípico configurado</p>
-                        <p className="text-sm mt-1">Adicione templates acima para começar</p>
+                        <p>Nenhum remetente atípico configurado</p>
+                        <p className="text-sm mt-1">Adicione os remetentes e seus diálogos atípicos acima</p>
                     </div>
                 )}
                 {templates.map(tpl => (
@@ -97,13 +96,13 @@ const TemplatesConfig = () => {
                         <div className="flex justify-between items-center">
                             <div>
                                 <h4 className="text-white font-bold flex items-center gap-2">
-                                    {tpl.label || 'Sem Label'}
+                                    {tpl.ref_numero || tpl.sender_id.slice(0, 12) + '...'}
                                     <span className={`text-xs px-2 py-0.5 rounded-full ${tpl.status === 'ativado' ? 'bg-lime-500/20 text-lime-400' : 'bg-red-500/20 text-red-400'}`}>
                                         {tpl.status?.toUpperCase()}
                                     </span>
                                 </h4>
                                 <p className="text-gray-500 text-sm font-mono mt-1">
-                                    Remetente: {tpl.ref_numero || tpl.sender_id.slice(0, 12) + '...'} | Diálogo: {tpl.dialog_id}
+                                    Diálogo: {tpl.dialog_id}
                                 </p>
                             </div>
                             <div className="flex items-center gap-3">
