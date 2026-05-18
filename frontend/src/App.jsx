@@ -11,6 +11,7 @@ import History from './components/History';
 import SetupPage from './components/SetupPage';
 import LiveActivity from './components/LiveActivity';
 import DailyFailures from './components/DailyFailures';
+import AtypicalDispatcher from './components/AtypicalDispatcher';
 
 function App() {
     const [token, setToken] = useState(localStorage.getItem('token'));
@@ -83,6 +84,8 @@ function App() {
                 return <LiveActivity token={token} />;
             case 'failures':
                 return <DailyFailures token={token} />;
+            case 'atypical':
+                return <AtypicalDispatcher token={token} />;
             default:
                 return <Dashboard token={token} />;
         }

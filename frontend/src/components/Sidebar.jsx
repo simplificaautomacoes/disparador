@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { LayoutDashboard, Settings, Upload, Phone, LogOut, History, Building2, Sun, Moon, Activity, XCircle, X } from 'lucide-react';
+import { LayoutDashboard, Settings, Upload, Phone, LogOut, History, Building2, Sun, Moon, Activity, XCircle, X, Zap } from 'lucide-react';
 
 const Sidebar = ({ activeTab, setActiveTab, user, onLogout, isOpen, setIsOpen }) => {
     const [companyInfo, setCompanyInfo] = useState({ name: 'Disparador', hasLogo: false });
@@ -39,6 +39,7 @@ const Sidebar = ({ activeTab, setActiveTab, user, onLogout, isOpen, setIsOpen })
         { id: 'failures', icon: XCircle, label: 'Falhas do Dia' },
         { id: 'upload', icon: Upload, label: 'Upload & Disparar' },
         { id: 'settings', icon: Settings, label: 'Configurações' },
+        { id: 'atypical', icon: Zap, label: 'Atípico' },
     ];
 
     return (

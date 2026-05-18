@@ -18,6 +18,7 @@ from datetime import timedelta
 import io
 
 from database import Database
+from atypical_service import AtypicalService
 
 app = FastAPI()
 
@@ -31,6 +32,8 @@ app.add_middleware(
 
 global_db = Database()
 global_db.import_from_json()
+
+atypical_service = AtypicalService()
 
 user_services: Dict[str, DispatcherService] = {}
 
@@ -304,7 +307,7 @@ def download_failures(current_user: dict = Depends(get_current_user)):
     cols = ['Horário', 'Nome', 'Telefone', 'Motivo da Falha', 'Remetente']
     df = df[cols]
     
-    file_path = os.path.join(DATA_DIR, "falhas_do_dia.xlsx")
+    file_path = os.path.join("data", "falhas_do_dia.xlsx")
     df.to_excel(file_path, index=False)
     
     return FileResponse(
@@ -312,3 +315,129 @@ def download_failures(current_user: dict = Depends(get_current_user)):
         filename=f"falhas_{pd.Timestamp.now().strftime('%Y-%m-%d')}.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# ══  ROTAS DO DISPARADOR ATÍPICO  ═════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+
+# --- Templates ---
+
+class AtypicalTemplateCreate(BaseModel):
+    sender_id: str
+    dialog_id: str
+    label: Optional[str] = ""
+
+class AtypicalTemplateUpdate(BaseModel):
+    dialog_id: Optional[str] = None
+    label: Optional[str] = None
+    status: Optional[str] = None
+
+@app.get("/atypical/templates")
+def get_atypical_templates(current_user: dict = Depends(get_current_user)):
+    return global_db.get_atypical_templates()
+
+@app.post("/atypical/templates")
+def add_atypical_template(data: AtypicalTemplateCreate, current_user: dict = Depends(get_current_user)):
+    new_id = global_db.add_atypical_template(data.sender_id, data.dialog_id, data.label or "")
+    return {"id": new_id, "message": "Template adicionado"}
+
+@app.put("/atypical/templates/{template_id}")
+def update_atypical_template(template_id: int, data: AtypicalTemplateUpdate, current_user: dict = Depends(get_current_user)):
+    global_db.update_atypical_template(template_id, data.dialog_id, data.label, data.status)
+    return {"message": "Template atualizado"}
+
+@app.delete("/atypical/templates/{template_id}")
+def delete_atypical_template(template_id: int, current_user: dict = Depends(get_current_user)):
+    global_db.delete_atypical_template(template_id)
+    return {"message": "Template removido"}
+
+# --- Upload Atípico ---
+
+@app.post("/atypical/upload")
+async def upload_atypical_file(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    safe_email = current_user["email"].replace("@", "_").replace(".", "_")
+    file_location = os.path.join("data", f"atypical_{safe_email}_{file.filename}")
+    with open(file_location, "wb+") as file_object:
+        shutil.copyfileobj(file.file, file_object)
+
+    try:
+        df = pd.read_excel(file_location)
+        df.columns = df.columns.str.strip()
+        columns = df.columns.tolist()
+        
+        # Pegar amostra das primeiras linhas para preview
+        sample = df.head(3).to_dict('records')
+        # Converter NaN para None para JSON
+        for row in sample:
+            for k, v in row.items():
+                if pd.isna(v):
+                    row[k] = None
+
+        return {
+            "message": f"Arquivo {file.filename} enviado.",
+            "file_path": file_location,
+            "filename": file.filename,
+            "columns": columns,
+            "total_rows": len(df),
+            "sample": sample
+        }
+    except Exception as e:
+        if os.path.exists(file_location):
+            os.remove(file_location)
+        raise HTTPException(status_code=400, detail=str(e))
+
+# --- Tarefas Atípicas ---
+
+class AtypicalTaskCreate(BaseModel):
+    file_path: str
+    phone_column: str
+    phone_column_fallback: Optional[str] = None
+    name_column: str
+    note_template: str = ""
+    column_mapping: Dict[str, Any] = {}
+    scheduled_at: Optional[str] = None  # ISO format ou null para executar agora
+    total: int = 0
+
+@app.post("/atypical/tasks")
+def create_atypical_task(data: AtypicalTaskCreate, current_user: dict = Depends(get_current_user)):
+    task_id = global_db.create_atypical_task(
+        file_path=data.file_path,
+        phone_column=data.phone_column,
+        name_column=data.name_column,
+        note_template=data.note_template,
+        column_mapping=data.column_mapping,
+        total=data.total,
+        phone_column_fallback=data.phone_column_fallback,
+        scheduled_at=data.scheduled_at,
+        created_by=current_user["email"]
+    )
+    
+    # Se não tem agendamento, iniciar imediatamente
+    if not data.scheduled_at:
+        atypical_service.start_task(task_id)
+    
+    return {"task_id": task_id, "message": "Tarefa criada"}
+
+@app.get("/atypical/tasks")
+def get_atypical_tasks(current_user: dict = Depends(get_current_user)):
+    return global_db.get_atypical_tasks()
+
+@app.get("/atypical/tasks/{task_id}")
+def get_atypical_task_status(task_id: int, current_user: dict = Depends(get_current_user)):
+    task = global_db.get_atypical_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    return task
+
+@app.delete("/atypical/tasks/{task_id}")
+def cancel_atypical_task(task_id: int, current_user: dict = Depends(get_current_user)):
+    atypical_service.cancel_task(task_id)
+    return {"message": "Tarefa cancelada"}
+
+# --- Remetentes disponíveis para atípico (herda do principal) ---
+
+@app.get("/atypical/senders")
+def get_atypical_senders(current_user: dict = Depends(get_current_user)):
+    """Retorna os remetentes do sistema principal para seleção nos templates atípicos"""
+    return global_db.get_senders()

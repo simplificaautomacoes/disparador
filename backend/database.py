@@ -94,6 +94,44 @@ class Database:
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE global_config ADD COLUMN endpoint_url TEXT DEFAULT 'https://s17.chatguru.app/api/v1'")
             
+            # Tabela de Templates Atípicos (diálogo por remetente para o atípico)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS atypical_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_id TEXT NOT NULL,
+                    dialog_id TEXT NOT NULL,
+                    label TEXT DEFAULT '',
+                    status TEXT DEFAULT 'ativado',
+                    created_at TEXT,
+                    FOREIGN KEY(sender_id) REFERENCES senders(id)
+                )
+            ''')
+
+            # Tabela de Tarefas Atípicas (disparos agendados ou em execução)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS atypical_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT DEFAULT 'pending',
+                    scheduled_at TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    file_path TEXT,
+                    phone_column TEXT,
+                    phone_column_fallback TEXT,
+                    name_column TEXT,
+                    note_template TEXT,
+                    column_mapping TEXT,
+                    total INTEGER DEFAULT 0,
+                    processed INTEGER DEFAULT 0,
+                    success INTEGER DEFAULT 0,
+                    failed INTEGER DEFAULT 0,
+                    skipped INTEGER DEFAULT 0,
+                    logs TEXT DEFAULT '[]',
+                    created_at TEXT,
+                    created_by TEXT
+                )
+            ''')
+
             conn.commit()
             conn.close()
 
@@ -340,3 +378,209 @@ class Database:
             rows = cursor.fetchall()
             conn.close()
             return [dict(r) for r in rows]
+
+    # ─── Atypical Templates ───
+
+    def get_atypical_templates(self):
+        """Retorna todos os templates atípicos agrupados por sender_id"""
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT at.*, s.ref_numero 
+                FROM atypical_templates at 
+                LEFT JOIN senders s ON at.sender_id = s.id
+                ORDER BY at.sender_id
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+
+    def add_atypical_template(self, sender_id, dialog_id, label="", status="ativado"):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO atypical_templates (sender_id, dialog_id, label, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                (sender_id, dialog_id, label, status, datetime.now().isoformat())
+            )
+            new_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return new_id
+
+    def update_atypical_template(self, template_id, dialog_id=None, label=None, status=None):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            updates = []
+            params = []
+            if dialog_id is not None:
+                updates.append("dialog_id = ?")
+                params.append(dialog_id)
+            if label is not None:
+                updates.append("label = ?")
+                params.append(label)
+            if status is not None:
+                updates.append("status = ?")
+                params.append(status)
+            if updates:
+                params.append(template_id)
+                cursor.execute(f"UPDATE atypical_templates SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+            conn.close()
+
+    def delete_atypical_template(self, template_id):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM atypical_templates WHERE id = ?", (template_id,))
+            conn.commit()
+            conn.close()
+
+    def get_active_atypical_senders(self):
+        """Retorna remetentes ativos com seus templates atípicos"""
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT at.sender_id, at.dialog_id, s.ref_numero
+                FROM atypical_templates at
+                JOIN senders s ON at.sender_id = s.id
+                WHERE at.status = 'ativado' AND s.status = 'ativado'
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+
+    # ─── Atypical Tasks ───
+
+    def create_atypical_task(self, file_path, phone_column, name_column, note_template,
+                              column_mapping, total, phone_column_fallback=None,
+                              scheduled_at=None, created_by=None):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            status = "scheduled" if scheduled_at else "pending"
+            cursor.execute("""
+                INSERT INTO atypical_tasks 
+                (status, scheduled_at, file_path, phone_column, phone_column_fallback,
+                 name_column, note_template, column_mapping, total, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (status, scheduled_at, file_path, phone_column, phone_column_fallback,
+                  name_column, note_template, json.dumps(column_mapping),
+                  total, datetime.now().isoformat(), created_by))
+            task_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return task_id
+
+    def get_atypical_tasks(self):
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM atypical_tasks ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            conn.close()
+            result = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["column_mapping"] = json.loads(d.get("column_mapping", "{}"))
+                except:
+                    d["column_mapping"] = {}
+                try:
+                    d["logs"] = json.loads(d.get("logs", "[]"))
+                except:
+                    d["logs"] = []
+                result.append(d)
+            return result
+
+    def get_atypical_task(self, task_id):
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM atypical_tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                d = dict(row)
+                try:
+                    d["column_mapping"] = json.loads(d.get("column_mapping", "{}"))
+                except:
+                    d["column_mapping"] = {}
+                try:
+                    d["logs"] = json.loads(d.get("logs", "[]"))
+                except:
+                    d["logs"] = []
+                return d
+            return None
+
+    def update_atypical_task_status(self, task_id, status, started_at=None, completed_at=None):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            updates = ["status = ?"]
+            params = [status]
+            if started_at:
+                updates.append("started_at = ?")
+                params.append(started_at)
+            if completed_at:
+                updates.append("completed_at = ?")
+                params.append(completed_at)
+            params.append(task_id)
+            cursor.execute(f"UPDATE atypical_tasks SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+            conn.close()
+
+    def update_atypical_task_progress(self, task_id, processed, success, failed, skipped, logs=None):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            if logs is not None:
+                cursor.execute(
+                    "UPDATE atypical_tasks SET processed = ?, success = ?, failed = ?, skipped = ?, logs = ? WHERE id = ?",
+                    (processed, success, failed, skipped, json.dumps(logs[-15:]), task_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE atypical_tasks SET processed = ?, success = ?, failed = ?, skipped = ? WHERE id = ?",
+                    (processed, success, failed, skipped, task_id)
+                )
+            conn.commit()
+            conn.close()
+
+    def delete_atypical_task(self, task_id):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM atypical_tasks WHERE id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+    def get_pending_atypical_tasks(self):
+        """Retorna tarefas agendadas prontas para executar"""
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute(
+                "SELECT * FROM atypical_tasks WHERE status = 'scheduled' AND scheduled_at <= ?",
+                (now,)
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            result = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["column_mapping"] = json.loads(d.get("column_mapping", "{}"))
+                except:
+                    d["column_mapping"] = {}
+                result.append(d)
+            return result
