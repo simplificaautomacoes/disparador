@@ -285,8 +285,7 @@ class AtypicalService:
         add_log(f"Iniciando disparo atípico: {total} contatos, {num_senders} remetentes")
 
         def worker(sender, rows_subset, worker_idx):
-            if worker_idx > 0:
-                time.sleep(worker_idx * 1.5)
+            # Todos os workers iniciam ao mesmo tempo — disparo simultâneo
 
             sender_id = sender["sender_id"]
             dialog_id = sender["dialog_id"]
@@ -336,6 +335,14 @@ class AtypicalService:
                 num_12, num_13 = formatado
                 ddd = int(num_12[2:4])
                 numero_final = num_13 if 11 <= ddd <= 29 else num_12
+
+                # Verifica se já foi enviado nos últimos 7 dias
+                if self.db.is_already_sent_today(num_12) or self.db.is_already_sent_today(num_13):
+                    with lock:
+                        counters["skipped"] += 1
+                        counters["processed"] += 1
+                    add_log(f"Pulado (já enviado esta semana): {nome or numero_final}", "pulado")
+                    continue
 
                 # 1. Enviar diálogo
                 resp = self.enviar_dialogo(numero_final, dialog_id, sender_id)
@@ -396,9 +403,11 @@ class AtypicalService:
                         self.adicionar_anotacao(fallback_note, note_text, sender_id)
 
                 if sucesso_envio:
+                    self.db.log_message(numero_final, sender_id, "success", name=nome, details="Disparo atípico")
                     with lock:
                         counters["success"] += 1
                 else:
+                    self.db.log_message(numero_final, sender_id, "failed", name=nome, details="Falha disparo atípico")
                     with lock:
                         counters["failed"] += 1
 
@@ -413,7 +422,7 @@ class AtypicalService:
                             logs
                         )
 
-                time.sleep(1 * num_senders)
+                time.sleep(1)  # Cada worker dispara independente, 1s entre cada envio por remetente
 
         # Launch workers
         threads = []

@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 
 DATA_DIR = "data"
@@ -291,12 +291,15 @@ class Database:
             conn.close()
 
     def is_already_sent_today(self, phone):
-        """Verifica se já foi enviado hoje (status success)"""
+        """Verifica se já foi enviado nos últimos 7 dias (status success)"""
         with self.lock:
             conn = self._get_conn()
             cursor = conn.cursor()
-            today = datetime.now().strftime("%Y-%m-%d")
-            cursor.execute("SELECT count(*) FROM message_log WHERE date = ? AND phone = ? AND status = 'success'", (today, phone))
+            seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            cursor.execute(
+                "SELECT count(*) FROM message_log WHERE date >= ? AND phone = ? AND status = 'success'",
+                (seven_days_ago, phone)
+            )
             count = cursor.fetchone()[0]
             conn.close()
             return count > 0
