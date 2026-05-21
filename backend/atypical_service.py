@@ -278,11 +278,13 @@ class AtypicalService:
                 if len(logs) > 15:
                     logs.pop()
 
-        # Divide dados entre remetentes
+        # Divide dados entre remetentes (cada remetente terá 2 workers simultâneos)
+        # Cada remetente recebe uma fatia, que é dividida em 2 sub-fatias para os 2 workers
         data_records = df.to_dict('records')
         slices = [data_records[i::num_senders] for i in range(num_senders)]
 
-        add_log(f"Iniciando disparo atípico: {total} contatos, {num_senders} remetentes")
+        num_workers_total = num_senders * 2  # 2 workers por remetente
+        add_log(f"Iniciando disparo atípico: {total} contatos, {num_senders} remetentes, {num_workers_total} workers simultâneos")
 
         def worker(sender, rows_subset, worker_idx):
             # Todos os workers iniciam ao mesmo tempo — disparo simultâneo
@@ -424,13 +426,30 @@ class AtypicalService:
 
                 time.sleep(1)  # Cada worker dispara independente, 1s entre cada envio por remetente
 
-        # Launch workers
+        # Launch workers (2 por remetente, dividindo a fatia entre eles)
         threads = []
+        worker_counter = 0
         for i, sender in enumerate(active_senders):
             if i < len(slices) and len(slices[i]) > 0:
-                t = threading.Thread(target=worker, args=(sender, slices[i], i), daemon=True)
-                threads.append(t)
-                t.start()
+                # Divide a fatia do remetente em 2 sub-fatias para 2 workers
+                fatia = slices[i]
+                mid = len(fatia) // 2
+                sub_fatia_1 = fatia[:mid]
+                sub_fatia_2 = fatia[mid:]
+                
+                # Worker 1 processa primeira metade
+                if len(sub_fatia_1) > 0:
+                    t1 = threading.Thread(target=worker, args=(sender, sub_fatia_1, worker_counter), daemon=True)
+                    threads.append(t1)
+                    t1.start()
+                    worker_counter += 1
+                
+                # Worker 2 processa segunda metade
+                if len(sub_fatia_2) > 0:
+                    t2 = threading.Thread(target=worker, args=(sender, sub_fatia_2, worker_counter), daemon=True)
+                    threads.append(t2)
+                    t2.start()
+                    worker_counter += 1
 
         # Wait for all
         for t in threads:
