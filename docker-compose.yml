@@ -2,14 +2,14 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "8002:8000"
     environment:
       - TZ=America/Sao_Paulo
     restart: unless-stopped
   frontend:
     build: ./frontend
     ports:
-      - "80:80"
+      - "82:80"
     environment:
       - BACKEND_URL=http://backend:8000
     restart: unless-stopped
