@@ -10,7 +10,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "${FRONTEND_PORT:-80}:80"
+      - "${FRONTEND_PORT:-8080}:80"
     environment:
       - BACKEND_URL=http://backend:8000
     restart: unless-stopped
