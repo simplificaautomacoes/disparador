@@ -3,12 +3,18 @@ services:
     build: ./backend
     environment:
       - TZ=America/Sao_Paulo
+      - MASTER_EMAIL=${MASTER_EMAIL:-simplificaautomacoes@gmail.com}
+      - MASTER_PASSWORD=${MASTER_PASSWORD:-123456}
+    expose:
+      - "8000"
     restart: unless-stopped
       
   frontend:
     build: ./frontend
     environment:
-      - BACKEND_URL=http://backend:8000
+      - BACKEND_URL=${BACKEND_URL:-http://backend:8000}
+    expose:
+      - "80"
     restart: unless-stopped
     depends_on:
       - backend
