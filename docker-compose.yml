@@ -4,6 +4,8 @@ services:
     environment:
       - TZ=America/Sao_Paulo
     restart: unless-stopped
+    volumes:
+      - backend_data:/app/data
       
   frontend:
     build: ./frontend
@@ -12,3 +14,6 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+volumes:
+  backend_data:
