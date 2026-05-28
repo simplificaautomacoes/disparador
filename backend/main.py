@@ -52,6 +52,7 @@ class SenderUpdateData(BaseModel):
     dialogos: List[str]
     ref_numero: Optional[str] = None
     sent_count: Optional[int] = None
+    daily_limit: Optional[int] = 0
 
 class ConfigUpdate(BaseModel):
     id_numeros: Dict[str, SenderUpdateData]
@@ -242,6 +243,7 @@ def get_config(current_user: dict = Depends(get_current_user)):
 def update_config(config: ConfigUpdate, current_user: dict = Depends(get_current_user)):
     for sender_id, data in config.id_numeros.items():
         global_db.update_sender_status(sender_id, data.status)
+        global_db.update_sender_daily_limit(sender_id, data.daily_limit or 0)
         existing = global_db.get_senders()["id_numeros"].get(sender_id, {})
         existing_dialogs = existing.get("dialogos", [])
         new_dialogs = data.dialogos

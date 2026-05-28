@@ -248,8 +248,8 @@ class AtypicalService:
             )
             return
 
-        # Carrega remetentes ativos com templates atípicos
-        active_senders = self.db.get_active_atypical_senders()
+        # Carrega remetentes ativos com templates atípicos e que não atingiram o limite diário
+        active_senders = [s for s in self.db.get_active_atypical_senders() if not self.db.has_sender_reached_limit(s["sender_id"])]
         if not active_senders:
             self.db.update_atypical_task_status(
                 task_id, "failed",
@@ -295,6 +295,11 @@ class AtypicalService:
 
             for row in rows_subset:
                 if cancel_event.is_set():
+                    break
+
+                # Check if daily limit reached
+                if self.db.has_sender_reached_limit(sender_id):
+                    add_log(f"Remetente {sender_ref} atingiu o limite diário. Interrompendo novos envios deste número hoje.", "falha")
                     break
 
                 # Pegar telefone

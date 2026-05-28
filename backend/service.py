@@ -50,7 +50,9 @@ class DispatcherService:
             if data.get("status") == "ativado":
                 self.status["sender_stats"][sender_id] = {
                     "name": data.get("ref_numero", "Unknown"),
-                    "sent_count": data.get("sent_count", 0)
+                    "sent_count": data.get("sent_count", 0),
+                    "daily_limit": data.get("daily_limit", 0),
+                    "today_count": data.get("today_count", 0)
                 }
 
     def _add_log(self, message):
@@ -137,6 +139,9 @@ class DispatcherService:
             self.reload_config()
             for id_remetente, info in self.config["id_numeros"].items():
                 if info["status"] == "ativado":
+                    if info.get("daily_limit", 0) > 0 and info.get("today_count", 0) >= info.get("daily_limit", 0):
+                        self._add_log(f"Remetente {info['ref_numero']} pulado: limite diário atingido hoje ({info['today_count']}/{info['daily_limit']}).")
+                        continue
                     for id_dialogo in info["dialogos"]:
                         active_senders.append({
                             "id_remetente": id_remetente,
@@ -179,6 +184,11 @@ class DispatcherService:
             for row in rows_subset:
                 try:
                     if not self.running:
+                        break
+
+                    # Check if daily limit reached
+                    if self.db.has_sender_reached_limit(sender_id):
+                        self._add_log(f"Remetente {sender_ref} atingiu o limite diário de disparos. Interrompendo novos envios deste número hoje.")
                         break
 
                     if row.get("_processed"):
@@ -236,6 +246,7 @@ class DispatcherService:
                             self.status["success"] += 1
                             if sender_id in self.status["sender_stats"]:
                                 self.status["sender_stats"][sender_id]["sent_count"] += 1
+                                self.status["sender_stats"][sender_id]["today_count"] += 1
                         self._add_structured_log(nome, numero_alvo, "Enviado", f"Já estava cadastrado, enviado direto.")
                     elif resp.get("code") == 400 and "Chat não encontrado" in resp.get("description", ""):
                         self._add_log(f"Cadastrando {numero_alvo}...")
@@ -293,6 +304,7 @@ class DispatcherService:
                                     self.status["success"] += 1
                                     if sender_id in self.status["sender_stats"]:
                                         self.status["sender_stats"][sender_id]["sent_count"] += 1
+                                        self.status["sender_stats"][sender_id]["today_count"] += 1
                                 self._add_structured_log(nome, numero_final, "Cadastrado e Enviado", f"Contato novo criado e mensagem entregue.")
                             else:
                                 err_desc = resp_reenvio.get('description', 'Erro Desconhecido')

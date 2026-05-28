@@ -228,14 +228,32 @@ const Dashboard = ({ token }) => {
                     <h3 className="text-xl font-bold text-white mb-4">Estatísticas por Remetente</h3>
                     <div className="space-y-4">
                         {status?.sender_stats && Object.entries(status.sender_stats).map(([id, stats]) => (
-                            <div key={id} className="flex justify-between items-center p-3 bg-dark-700 rounded-lg">
-                                <div>
-                                    <p className="text-sm font-medium text-white font-mono">{stats.name}</p>
-                                    <p className="text-xs text-gray-400">ID: {id.slice(0, 8)}...</p>
+                            <div key={id} className="p-3 bg-dark-700 rounded-lg space-y-2">
+                                <div className="flex justify-between items-center">
+                                    <div>
+                                        <p className="text-sm font-medium text-white font-mono">{stats.name}</p>
+                                        <p className="text-xs text-gray-400">ID: {id.slice(0, 8)}...</p>
+                                    </div>
+                                    <div className="bg-dark-900 px-3 py-1 rounded-md text-right">
+                                        <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Total</p>
+                                        <span className="text-lime-400 font-bold text-sm">{stats.sent_count}</span>
+                                    </div>
                                 </div>
-                                <div className="bg-dark-900 px-3 py-1 rounded-md">
-                                    <span className="text-lime-400 font-bold">{stats.sent_count}</span>
+                                <div className="pt-2 border-t border-dark-800 flex justify-between items-center text-xs text-gray-400">
+                                    <span>Hoje:</span>
+                                    <span className="font-semibold text-white">
+                                        {stats.today_count || 0}
+                                        {stats.daily_limit > 0 ? ` / ${stats.daily_limit}` : ' (Ilimitado)'}
+                                    </span>
                                 </div>
+                                {stats.daily_limit > 0 && (
+                                    <div className="w-full bg-dark-900 rounded-full h-1.5 mt-1 overflow-hidden">
+                                        <div 
+                                            className={`h-1.5 rounded-full transition-all duration-500 ${stats.today_count >= stats.daily_limit ? 'bg-red-500' : 'bg-lime-500'}`}
+                                            style={{ width: `${Math.min(100, ((stats.today_count || 0) / stats.daily_limit) * 100)}%` }}
+                                        ></div>
+                                    </div>
+                                )}
                             </div>
                         ))}
                         {(!status?.sender_stats || Object.keys(status.sender_stats).length === 0) && (

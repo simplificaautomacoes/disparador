@@ -163,31 +163,83 @@ const Settings = ({ token }) => {
                             </div>
                         </div>
 
-                        <div className="bg-dark-900 rounded-lg p-4">
-                            <div className="flex justify-between items-center mb-3">
-                                <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider">IDs de Diálogo</h4>
-                                <button
-                                    onClick={() => addDialog(id)}
-                                    className="text-xs flex items-center gap-1 text-lime-400 hover:text-lime-300"
-                                >
-                                    <Plus size={14} /> Adicionar
-                                </button>
-                            </div>
-                            <div className="space-y-2">
-                                {info.dialogos.map((dialog, idx) => (
-                                    <div key={idx} className="flex justify-between items-center bg-dark-800 p-2 rounded border border-dark-700">
-                                        <span className="font-mono text-sm text-gray-300">{dialog}</span>
-                                        <button
-                                            onClick={() => removeDialog(id, idx)}
-                                            className="text-red-400 hover:text-red-300 p-1"
-                                        >
-                                            <Trash2 size={14} />
-                                        </button>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            {/* Limite Diário */}
+                            <div className="bg-dark-900 rounded-lg p-4 flex flex-col justify-between">
+                                <div>
+                                    <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">Limite de Disparos Diários</h4>
+                                    <div className="flex items-center gap-3">
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            value={info.daily_limit !== undefined ? info.daily_limit : 0}
+                                            onChange={(e) => {
+                                                const val = parseInt(e.target.value) || 0;
+                                                setConfig(prev => {
+                                                    const newState = { ...prev };
+                                                    newState.id_numeros[id].daily_limit = val;
+                                                    return newState;
+                                                });
+                                            }}
+                                            className="w-24 bg-dark-800 border border-dark-700 text-white p-2 rounded-lg focus:outline-none focus:border-lime-500 text-center font-bold"
+                                            placeholder="0"
+                                        />
+                                        <span className="text-xs text-gray-400">
+                                            (Defina 0 para ilimitado)
+                                        </span>
                                     </div>
-                                ))}
-                                {info.dialogos.length === 0 && (
-                                    <p className="text-gray-600 text-sm italic">Nenhum diálogo configurado</p>
-                                )}
+                                    <p className="text-xs text-gray-500 mt-2">Os limites são redefinidos automaticamente à meia-noite (horário de Brasília).</p>
+                                </div>
+                                <div className="mt-4 pt-4 border-t border-dark-800 flex items-center justify-between">
+                                    <span className="text-sm text-gray-400">Progresso de Hoje:</span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-bold text-white">
+                                            {info.today_count || 0}
+                                        </span>
+                                        {info.daily_limit > 0 ? (
+                                            <>
+                                                <span className="text-gray-500 text-sm">/</span>
+                                                <span className="text-sm font-bold text-lime-400">{info.daily_limit}</span>
+                                                {info.today_count >= info.daily_limit && (
+                                                    <span className="ml-2 px-2 py-0.5 text-[10px] bg-red-500/20 text-red-400 border border-red-500/30 rounded-full font-bold uppercase tracking-wider animate-pulse">
+                                                        Limite Atingido
+                                                    </span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <span className="text-[10px] text-gray-500 italic">(Sem Limite)</span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* IDs de Diálogo */}
+                            <div className="bg-dark-900 rounded-lg p-4">
+                                <div className="flex justify-between items-center mb-3">
+                                    <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider">IDs de Diálogo</h4>
+                                    <button
+                                        onClick={() => addDialog(id)}
+                                        className="text-xs flex items-center gap-1 text-lime-400 hover:text-lime-300"
+                                    >
+                                        <Plus size={14} /> Adicionar
+                                    </button>
+                                </div>
+                                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                                    {info.dialogos.map((dialog, idx) => (
+                                        <div key={idx} className="flex justify-between items-center bg-dark-800 p-2 rounded border border-dark-700">
+                                            <span className="font-mono text-sm text-gray-300">{dialog}</span>
+                                            <button
+                                                onClick={() => removeDialog(id, idx)}
+                                                className="text-red-400 hover:text-red-300 p-1"
+                                            >
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    {info.dialogos.length === 0 && (
+                                        <p className="text-gray-600 text-sm italic">Nenhum diálogo configurado</p>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     </div>

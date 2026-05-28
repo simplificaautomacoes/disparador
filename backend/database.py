@@ -1,8 +1,10 @@
 import sqlite3
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
+
+BRT = timezone(timedelta(hours=-3))
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -40,6 +42,12 @@ class Database:
                 cursor.execute("SELECT legacy_success_count FROM senders LIMIT 1")
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE senders ADD COLUMN legacy_success_count INTEGER DEFAULT 0")
+            
+            # Check if daily_limit column exists
+            try:
+                cursor.execute("SELECT daily_limit FROM senders LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE senders ADD COLUMN daily_limit INTEGER DEFAULT 0")
             
             # Tabela de Dialogos dos Remetentes
             cursor.execute('''
@@ -222,9 +230,18 @@ class Database:
                 
                 total_count = log_count + (row["legacy_success_count"] or 0)
 
+                # Get daily dispatches today (Brasilia Time)
+                today = datetime.now(BRT).strftime("%Y-%m-%d")
+                cursor.execute("SELECT count(*) FROM message_log WHERE sender_id = ? AND status = 'success' AND date = ?", (sender_id, today))
+                today_count = cursor.fetchone()[0]
+
+                daily_limit = row["daily_limit"] if "daily_limit" in row.keys() else 0
+
                 result[sender_id] = {
                     "ref_numero": row["ref_numero"],
                     "status": row["status"],
+                    "daily_limit": daily_limit,
+                    "today_count": today_count,
                     "dialogos": dialogs,
                     "sent_count": total_count
                 }
@@ -252,6 +269,33 @@ class Database:
             cursor.execute("UPDATE senders SET status = ? WHERE id = ?", (status, sender_id))
             conn.commit()
             conn.close()
+
+    def update_sender_daily_limit(self, sender_id, limit):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE senders SET daily_limit = ? WHERE id = ?", (limit, sender_id))
+            conn.commit()
+            conn.close()
+
+    def has_sender_reached_limit(self, sender_id):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT daily_limit FROM senders WHERE id = ?", (sender_id,))
+            row = cursor.fetchone()
+            if not row or row[0] is None or row[0] <= 0:
+                conn.close()
+                return False
+            daily_limit = row[0]
+            
+            # Count today's successful dispatches in Brasília Time
+            today = datetime.now(BRT).strftime("%Y-%m-%d")
+            cursor.execute("SELECT count(*) FROM message_log WHERE sender_id = ? AND status = 'success' AND date = ?", (sender_id, today))
+            today_count = cursor.fetchone()[0]
+            conn.close()
+            
+            return today_count >= daily_limit
 
     def delete_sender(self, sender_id):
         with self.lock:
