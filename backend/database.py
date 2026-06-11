@@ -302,6 +302,7 @@ class Database:
             conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM sender_dialogs WHERE sender_id = ?", (sender_id,))
+            cursor.execute("DELETE FROM atypical_templates WHERE sender_id = ?", (sender_id,))
             cursor.execute("DELETE FROM senders WHERE id = ?", (sender_id,))
             conn.commit()
             conn.close()

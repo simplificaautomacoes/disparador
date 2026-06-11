@@ -85,9 +85,10 @@ const Settings = ({ token }) => {
     const deleteSender = async (id) => {
         if (!confirm("Tem certeza que deseja excluir este remetente completamente?")) return;
         try {
-            await axios.delete(`/api/senders/${id}`);
-            fetchConfig(); // Recarrega os remetentes
+            await axios.delete(`/api/senders/${encodeURIComponent(id)}`);
+            fetchConfig();
         } catch (err) {
+            console.error("Erro ao excluir remetente:", err);
             alert("Erro ao excluir remetente: " + (err.response?.data?.detail || err.message));
         }
     };
