@@ -31,31 +31,45 @@ const Settings = ({ token }) => {
     };
 
     const toggleStatus = (id) => {
-        setConfig(prev => {
-            const newState = { ...prev };
-            const newStatus = newState.id_numeros[id].status === "ativado" ? "desativado" : "ativado";
-            newState.id_numeros[id].status = newStatus;
-            return newState;
-        });
+        setConfig(prev => ({
+            ...prev,
+            id_numeros: {
+                ...prev.id_numeros,
+                [id]: {
+                    ...prev.id_numeros[id],
+                    status: prev.id_numeros[id].status === "ativado" ? "desativado" : "ativado"
+                }
+            }
+        }));
     };
 
     const addDialog = (id) => {
         const dialogId = prompt("Digite o ID do diálogo:");
         if (!dialogId) return;
-        setConfig(prev => {
-            const newState = { ...prev };
-            newState.id_numeros[id].dialogos.push(dialogId);
-            return newState;
-        });
+        setConfig(prev => ({
+            ...prev,
+            id_numeros: {
+                ...prev.id_numeros,
+                [id]: {
+                    ...prev.id_numeros[id],
+                    dialogos: [...prev.id_numeros[id].dialogos, dialogId]
+                }
+            }
+        }));
     };
 
     const removeDialog = (senderId, dialogIndex) => {
         if (!confirm("Remover este diálogo?")) return;
-        setConfig(prev => {
-            const newState = { ...prev };
-            newState.id_numeros[senderId].dialogos.splice(dialogIndex, 1);
-            return newState;
-        });
+        setConfig(prev => ({
+            ...prev,
+            id_numeros: {
+                ...prev.id_numeros,
+                [senderId]: {
+                    ...prev.id_numeros[senderId],
+                    dialogos: prev.id_numeros[senderId].dialogos.filter((_, i) => i !== dialogIndex)
+                }
+            }
+        }));
     };
 
     const addSender = async (id, ref) => {
@@ -175,11 +189,16 @@ const Settings = ({ token }) => {
                                             value={info.daily_limit !== undefined ? info.daily_limit : 0}
                                             onChange={(e) => {
                                                 const val = parseInt(e.target.value) || 0;
-                                                setConfig(prev => {
-                                                    const newState = { ...prev };
-                                                    newState.id_numeros[id].daily_limit = val;
-                                                    return newState;
-                                                });
+                                                setConfig(prev => ({
+                                                    ...prev,
+                                                    id_numeros: {
+                                                        ...prev.id_numeros,
+                                                        [id]: {
+                                                            ...prev.id_numeros[id],
+                                                            daily_limit: val
+                                                        }
+                                                    }
+                                                }));
                                             }}
                                             className="w-24 bg-dark-800 border border-dark-700 text-white p-2 rounded-lg focus:outline-none focus:border-lime-500 text-center font-bold"
                                             placeholder="0"

@@ -163,9 +163,9 @@ def start_dispatch(req: StartRequest, current_user: dict = Depends(get_current_u
         if not svc.current_file_path:
             raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
         
-        # Resume if paused and the sheet matches
         if getattr(svc, 'paused', False) and svc.status.get("current_sheet") == req.sheet_name:
             svc.paused = False
+            svc.stop_event.clear()
         else:
             svc.load_data(svc.current_file_path, sheet_name=req.sheet_name)
             

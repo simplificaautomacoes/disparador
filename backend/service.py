@@ -11,6 +11,8 @@ class DispatcherService:
     def __init__(self):
         self.running = False
         self.paused = False
+        self.stop_event = threading.Event()
+        self._thread_epoch = 0
         self.thread = None
         self.data = []
         self.status = {
@@ -93,6 +95,7 @@ class DispatcherService:
 
     def load_data(self, file_path, sheet_name=0):
         self.paused = False
+        self.stop_event.clear()
         try:
             df = pd.read_excel(file_path, sheet_name=sheet_name)
             df.columns = df.columns.str.strip()  # Fix column names with trailing/leading spaces
@@ -115,24 +118,24 @@ class DispatcherService:
     def start(self, user_email=None):
         if not self.running:
             self.running = True
+            self.stop_event.clear()
+            self._thread_epoch += 1
             self.status["started_by"] = user_email
-            self.thread = threading.Thread(target=self._process_loop)
+            self.thread = threading.Thread(target=self._process_loop, args=(self._thread_epoch,), daemon=True)
             self.thread.start()
 
     def stop(self):
         self.running = False
         self.paused = True
-        if self.thread:
-            self.thread.join()
-        if self.status["current_action"] != "Concluído":
-            self._add_log("Parado pelo usuário")
+        self.stop_event.set()
+        self._add_log("Parado pelo usuário")
 
     def get_status(self):
         res = self.status.copy()
-        res["is_running"] = getattr(self, "running", False)
+        res["is_running"] = self.running and (self.thread is not None and self.thread.is_alive())
         return res
 
-    def _process_loop(self):
+    def _process_loop(self, epoch):
         # Prepare active senders
         active_senders = []
         try:
@@ -183,7 +186,7 @@ class DispatcherService:
 
             for row in rows_subset:
                 try:
-                    if not self.running:
+                    if not self.running or self.stop_event.is_set():
                         break
 
                     # Check if daily limit reached
@@ -348,7 +351,8 @@ class DispatcherService:
         for t in threads:
             t.join()
 
-        self.running = False
+        if self._thread_epoch == epoch:
+            self.running = False
         
         if self.paused:
             self.status["current_action"] = "Parado pelo usuário"

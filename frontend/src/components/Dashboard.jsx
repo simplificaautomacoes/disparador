@@ -25,6 +25,7 @@ const StatCard = ({ title, value, icon: Icon, color }) => (
 const Dashboard = ({ token }) => {
     const [status, setStatus] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [actionLoading, setActionLoading] = useState(false);
     const [elapsed, setElapsed] = useState('');
 
     useEffect(() => {
@@ -71,20 +72,26 @@ const Dashboard = ({ token }) => {
     }, []);
 
     const handleStop = async () => {
+        setActionLoading(true);
+        setStatus(prev => prev ? { ...prev, current_action: "Parado pelo usuário", is_running: false } : prev);
         try {
             await axios.post('/api/stop');
-            fetchStatus();
         } catch (error) {
-            alert("Erro ao pausar");
+        } finally {
+            fetchStatus();
+            setActionLoading(false);
         }
     };
 
     const handleResume = async () => {
+        setActionLoading(true);
+        setStatus(prev => prev ? { ...prev, current_action: "Retomando...", is_running: true } : prev);
         try {
             await axios.post('/api/start', { sheet_name: status.current_sheet });
-            fetchStatus();
         } catch (error) {
-            alert("Erro ao retomar");
+        } finally {
+            fetchStatus();
+            setActionLoading(false);
         }
     };
 
@@ -101,17 +108,19 @@ const Dashboard = ({ token }) => {
                     {status?.current_action && status.current_action === "Parado pelo usuário" && (
                         <button
                             onClick={handleResume}
-                            className="flex items-center gap-2 px-4 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors"
+                            disabled={actionLoading}
+                            className="flex items-center gap-2 px-4 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            <Play size={18} fill="currentColor" /> Retomar
+                            <Play size={18} fill="currentColor" /> {actionLoading ? 'Retomando...' : 'Retomar'}
                         </button>
                     )}
                     {status?.current_action && status?.current_action !== "Aguardando..." && status?.current_action !== "Idle" && status?.current_action !== "Pronto para iniciar" && status?.current_action !== "Parado pelo usuário" && status?.current_action !== "Concluído" && status?.current_action !== "Erro: Nenhum remetente ativo" && (
                         <button
                             onClick={handleStop}
-                            className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-dark-900 rounded-lg font-bold transition-colors"
+                            disabled={actionLoading}
+                            className="flex items-center gap-2 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-dark-900 rounded-lg font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            <Pause size={18} fill="currentColor" /> Pausar
+                            <Pause size={18} fill="currentColor" /> {actionLoading ? 'Pausando...' : 'Pausar'}
                         </button>
                     )}
                 </div>
