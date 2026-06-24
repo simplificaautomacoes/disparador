@@ -10,6 +10,7 @@ import requests
 import time
 import math
 import threading
+import queue
 import re
 from datetime import datetime, timezone, timedelta
 from database import Database
@@ -33,7 +34,9 @@ class AtypicalService:
         if self._scheduler_running:
             return
         self._scheduler_running = True
-        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop, daemon=True
+        )
         self._scheduler_thread.start()
 
     def _scheduler_loop(self):
@@ -68,7 +71,9 @@ class AtypicalService:
                     continue
                 return dict(res.json())
             except requests.exceptions.RequestException as e:
-                print(f"[Atípico] Falha de conexão (Tentativa {attempt+1}/{max_retries}): {e}")
+                print(
+                    f"[Atípico] Falha de conexão (Tentativa {attempt + 1}/{max_retries}): {e}"
+                )
                 if attempt < max_retries - 1:
                     time.sleep(delay)
                     delay *= 2
@@ -108,7 +113,7 @@ class AtypicalService:
             "phone_id": phone_id,
             "action": "dialog_execute",
             "chat_number": numero_formatado,
-            "dialog_id": dialog_id
+            "dialog_id": dialog_id,
         }
         endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
         return self._make_request(endpoint_url, parametros)
@@ -118,7 +123,11 @@ class AtypicalService:
         if not cred:
             return {}
         nome_str = str(nome).strip()
-        nome_safe = nome_str if nome_str and nome_str.lower() != 'nan' else f"Novo Contato {numero_formatado}"
+        nome_safe = (
+            nome_str
+            if nome_str and nome_str.lower() != "nan"
+            else f"Novo Contato {numero_formatado}"
+        )
         parametros = {
             "key": cred["token_key"],
             "account_id": cred["account_id"],
@@ -126,7 +135,7 @@ class AtypicalService:
             "action": "chat_add",
             "name": nome_safe,
             "chat_number": numero_formatado,
-            "text": " "
+            "text": " ",
         }
         endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
         return self._make_request(endpoint_url, parametros)
@@ -141,7 +150,7 @@ class AtypicalService:
             "phone_id": phone_id,
             "action": "chat_add_status",
             "chat_add_id": chat_add_id,
-            "chat_number": chat_number
+            "chat_number": chat_number,
         }
         endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
         return self._make_request(endpoint_url, parametros)
@@ -156,7 +165,7 @@ class AtypicalService:
             "phone_id": phone_id,
             "action": "note_add",
             "chat_number": numero,
-            "note_text": note_text
+            "note_text": note_text,
         }
         endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
         return self._make_request(endpoint_url, parametros)
@@ -164,10 +173,10 @@ class AtypicalService:
     def _limpa_valor_monetario(self, valor):
         try:
             if isinstance(valor, str):
-                if ',' in valor and '.' not in valor:
-                    return float(valor.replace(',', '.'))
-                elif ',' in valor and '.' in valor:
-                    return float(valor.replace('.', '').replace(',', '.'))
+                if "," in valor and "." not in valor:
+                    return float(valor.replace(",", "."))
+                elif "," in valor and "." in valor:
+                    return float(valor.replace(".", "").replace(",", "."))
                 return float(valor)
             return float(valor)
         except:
@@ -212,8 +221,7 @@ class AtypicalService:
         if task_id in self.task_cancellation:
             self.task_cancellation[task_id].set()
         self.db.update_atypical_task_status(
-            task_id, "cancelled",
-            completed_at=datetime.now(BRT).isoformat()
+            task_id, "cancelled", completed_at=datetime.now(BRT).isoformat()
         )
         return True
 
@@ -221,7 +229,9 @@ class AtypicalService:
         """Lança a thread que processa a tarefa"""
         cancel_event = threading.Event()
         self.task_cancellation[task_id] = cancel_event
-        t = threading.Thread(target=self._execute_task, args=(task_id, cancel_event), daemon=True)
+        t = threading.Thread(
+            target=self._execute_task, args=(task_id, cancel_event), daemon=True
+        )
         self.active_tasks[task_id] = t
         t.start()
 
@@ -233,8 +243,7 @@ class AtypicalService:
 
         # Marca como running
         self.db.update_atypical_task_status(
-            task_id, "running",
-            started_at=datetime.now(BRT).isoformat()
+            task_id, "running", started_at=datetime.now(BRT).isoformat()
         )
 
         # Carrega planilha
@@ -243,17 +252,19 @@ class AtypicalService:
             df.columns = df.columns.str.strip()
         except Exception as e:
             self.db.update_atypical_task_status(
-                task_id, "failed",
-                completed_at=datetime.now(BRT).isoformat()
+                task_id, "failed", completed_at=datetime.now(BRT).isoformat()
             )
             return
 
         # Carrega remetentes ativos com templates atípicos e que não atingiram o limite diário
-        active_senders = [s for s in self.db.get_active_atypical_senders() if not self.db.has_sender_reached_limit(s["sender_id"])]
+        active_senders = [
+            s
+            for s in self.db.get_active_atypical_senders()
+            if not self.db.has_sender_reached_limit(s["sender_id"])
+        ]
         if not active_senders:
             self.db.update_atypical_task_status(
-                task_id, "failed",
-                completed_at=datetime.now(BRT).isoformat()
+                task_id, "failed", completed_at=datetime.now(BRT).isoformat()
             )
             return
 
@@ -278,29 +289,42 @@ class AtypicalService:
                 if len(logs) > 15:
                     logs.pop()
 
-        # Divide dados entre remetentes (cada remetente terá 2 workers simultâneos)
-        # Cada remetente recebe uma fatia, que é dividida em 2 sub-fatias para os 2 workers
-        data_records = df.to_dict('records')
-        slices = [data_records[i::num_senders] for i in range(num_senders)]
+        # Fila compartilhada: contatos são redistribuídos automaticamente quando um remetente atinge o limite
+        data_records = df.to_dict("records")
+        work_queue = queue.Queue()
+        for i in range(len(data_records)):
+            work_queue.put(i)
 
         num_workers_total = num_senders * 2  # 2 workers por remetente
-        add_log(f"Iniciando disparo atípico: {total} contatos, {num_senders} remetentes, {num_workers_total} workers simultâneos")
+        add_log(
+            f"Iniciando disparo atípico: {total} contatos, {num_senders} remetentes, {num_workers_total} workers simultâneos"
+        )
 
-        def worker(sender, rows_subset, worker_idx):
+        def worker(sender, worker_idx):
             # Todos os workers iniciam ao mesmo tempo — disparo simultâneo
 
             sender_id = sender["sender_id"]
             dialog_id = sender["dialog_id"]
             sender_ref = sender["ref_numero"]
 
-            for row in rows_subset:
+            while True:
                 if cancel_event.is_set():
                     break
 
                 # Check if daily limit reached
                 if self.db.has_sender_reached_limit(sender_id):
-                    add_log(f"Remetente {sender_ref} atingiu o limite diário. Interrompendo novos envios deste número hoje.", "falha")
+                    add_log(
+                        f"Remetente {sender_ref} atingiu o limite diário. Interrompendo novos envios deste número hoje.",
+                        "falha",
+                    )
                     break
+
+                try:
+                    row_idx = work_queue.get_nowait()
+                except queue.Empty:
+                    break  # Fila vazia — todo o trabalho foi distribuído
+
+                row = data_records[row_idx]
 
                 # Pegar telefone
                 phone_raw = row.get(phone_col)
@@ -325,6 +349,7 @@ class AtypicalService:
                     with lock:
                         counters["skipped"] += 1
                         counters["processed"] += 1
+                    work_queue.task_done()
                     continue
 
                 nome = str(row.get(name_col, "")).strip()
@@ -337,6 +362,7 @@ class AtypicalService:
                         counters["failed"] += 1
                         counters["processed"] += 1
                     add_log(f"Número inválido: {numero_alvo}", "falha")
+                    work_queue.task_done()
                     continue
 
                 num_12, num_13 = formatado
@@ -344,11 +370,17 @@ class AtypicalService:
                 numero_final = num_13 if 11 <= ddd <= 29 else num_12
 
                 # Verifica se já foi enviado nos últimos 7 dias
-                if self.db.is_already_sent_today(num_12) or self.db.is_already_sent_today(num_13):
+                if self.db.is_already_sent_today(
+                    num_12
+                ) or self.db.is_already_sent_today(num_13):
                     with lock:
                         counters["skipped"] += 1
                         counters["processed"] += 1
-                    add_log(f"Pulado (já enviado esta semana): {nome or numero_final}", "pulado")
+                    add_log(
+                        f"Pulado (já enviado esta semana): {nome or numero_final}",
+                        "pulado",
+                    )
+                    work_queue.task_done()
                     continue
 
                 # 1. Enviar diálogo
@@ -357,8 +389,13 @@ class AtypicalService:
 
                 if resp.get("code") == 200:
                     sucesso_envio = True
-                    add_log(f"Enviado direto: {nome or numero_final} via {sender_ref}", "enviado")
-                elif resp.get("code") == 400 and "Chat não encontrado" in resp.get("description", ""):
+                    add_log(
+                        f"Enviado direto: {nome or numero_final} via {sender_ref}",
+                        "enviado",
+                    )
+                elif resp.get("code") == 400 and "Chat não encontrado" in resp.get(
+                    "description", ""
+                ):
                     # Cadastrar
                     reg_resp = self.cadastrar_chat(numero_final, nome, sender_id)
                     chat_add_id = reg_resp.get("chat_add_id")
@@ -375,7 +412,9 @@ class AtypicalService:
                             if cancel_event.is_set():
                                 break
                             time.sleep(1)
-                            status_req = self.verificar_status_cadastro(chat_add_id, sender_id, numero_final)
+                            status_req = self.verificar_status_cadastro(
+                                chat_add_id, sender_id, numero_final
+                            )
                             reg_status = status_req.get("chat_add_status")
                             if reg_status in ["success", "done"]:
                                 chat_pronto = True
@@ -383,38 +422,72 @@ class AtypicalService:
                             elif reg_status in ["error", "invalid"]:
                                 break
 
-                        resp_reenvio = self.enviar_dialogo(numero_final, dialog_id, sender_id)
+                        resp_reenvio = self.enviar_dialogo(
+                            numero_final, dialog_id, sender_id
+                        )
 
-                        if resp_reenvio.get("code") == 400 and "Chat não encontrado" in resp_reenvio.get("description", ""):
-                            fallback_envio = num_12 if numero_final == num_13 else num_13
-                            resp_reenvio = self.enviar_dialogo(fallback_envio, dialog_id, sender_id)
+                        if resp_reenvio.get(
+                            "code"
+                        ) == 400 and "Chat não encontrado" in resp_reenvio.get(
+                            "description", ""
+                        ):
+                            fallback_envio = (
+                                num_12 if numero_final == num_13 else num_13
+                            )
+                            resp_reenvio = self.enviar_dialogo(
+                                fallback_envio, dialog_id, sender_id
+                            )
                             numero_final = fallback_envio
 
                         if resp_reenvio.get("code") == 200:
                             sucesso_envio = True
-                            add_log(f"Cadastrado e enviado: {nome or numero_final} via {sender_ref}", "cadastrado")
+                            add_log(
+                                f"Cadastrado e enviado: {nome or numero_final} via {sender_ref}",
+                                "cadastrado",
+                            )
                         else:
-                            add_log(f"Falha pós-cadastro: {nome or numero_final}", "falha")
+                            add_log(
+                                f"Falha pós-cadastro: {nome or numero_final}", "falha"
+                            )
                     else:
                         add_log(f"Cadastro falhou: {nome or numero_final}", "falha")
                 else:
-                    add_log(f"Erro API: {nome or numero_final} - {resp.get('description', 'Erro')}", "falha")
+                    add_log(
+                        f"Erro API: {nome or numero_final} - {resp.get('description', 'Erro')}",
+                        "falha",
+                    )
 
                 # 2. Enviar anotação se sucesso e template não vazio
                 if sucesso_envio and note_template and note_template.strip():
-                    note_text = self._build_note_text(note_template, row, column_mapping)
-                    resp_note = self.adicionar_anotacao(numero_final, note_text, sender_id)
+                    note_text = self._build_note_text(
+                        note_template, row, column_mapping
+                    )
+                    resp_note = self.adicionar_anotacao(
+                        numero_final, note_text, sender_id
+                    )
                     if resp_note.get("code") not in [200, 201]:
                         # Fallback anotação
                         fallback_note = num_12 if numero_final == num_13 else num_13
                         self.adicionar_anotacao(fallback_note, note_text, sender_id)
 
                 if sucesso_envio:
-                    self.db.log_message(numero_final, sender_id, "success", name=nome, details="Disparo atípico")
+                    self.db.log_message(
+                        numero_final,
+                        sender_id,
+                        "success",
+                        name=nome,
+                        details="Disparo atípico",
+                    )
                     with lock:
                         counters["success"] += 1
                 else:
-                    self.db.log_message(numero_final, sender_id, "failed", name=nome, details="Falha disparo atípico")
+                    self.db.log_message(
+                        numero_final,
+                        sender_id,
+                        "failed",
+                        name=nome,
+                        details="Falha disparo atípico",
+                    )
                     with lock:
                         counters["failed"] += 1
 
@@ -424,37 +497,31 @@ class AtypicalService:
                     if counters["processed"] % 5 == 0 or counters["processed"] == total:
                         self.db.update_atypical_task_progress(
                             task_id,
-                            counters["processed"], counters["success"],
-                            counters["failed"], counters["skipped"],
-                            logs
+                            counters["processed"],
+                            counters["success"],
+                            counters["failed"],
+                            counters["skipped"],
+                            logs,
                         )
 
-                time.sleep(1)  # Cada worker dispara independente, 1s entre cada envio por remetente
+                work_queue.task_done()
+                time.sleep(
+                    1
+                )  # Cada worker dispara independente, 1s entre cada envio por remetente
 
-        # Launch workers (2 por remetente, dividindo a fatia entre eles)
+        # Launch workers (2 por remetente, todos puxando da fila compartilhada)
         threads = []
         worker_counter = 0
         for i, sender in enumerate(active_senders):
-            if i < len(slices) and len(slices[i]) > 0:
-                # Divide a fatia do remetente em 2 sub-fatias para 2 workers
-                fatia = slices[i]
-                mid = len(fatia) // 2
-                sub_fatia_1 = fatia[:mid]
-                sub_fatia_2 = fatia[mid:]
-                
-                # Worker 1 processa primeira metade
-                if len(sub_fatia_1) > 0:
-                    t1 = threading.Thread(target=worker, args=(sender, sub_fatia_1, worker_counter), daemon=True)
-                    threads.append(t1)
-                    t1.start()
-                    worker_counter += 1
-                
-                # Worker 2 processa segunda metade
-                if len(sub_fatia_2) > 0:
-                    t2 = threading.Thread(target=worker, args=(sender, sub_fatia_2, worker_counter), daemon=True)
-                    threads.append(t2)
-                    t2.start()
-                    worker_counter += 1
+            for w in range(2):
+                t = threading.Thread(
+                    target=worker,
+                    args=(sender, worker_counter),
+                    daemon=True,
+                )
+                threads.append(t)
+                t.start()
+                worker_counter += 1
 
         # Wait for all
         for t in threads:
@@ -464,17 +531,21 @@ class AtypicalService:
         final_status = "cancelled" if cancel_event.is_set() else "done"
         self.db.update_atypical_task_progress(
             task_id,
-            counters["processed"], counters["success"],
-            counters["failed"], counters["skipped"],
-            logs
+            counters["processed"],
+            counters["success"],
+            counters["failed"],
+            counters["skipped"],
+            logs,
         )
         self.db.update_atypical_task_status(
-            task_id, final_status,
-            completed_at=datetime.now(BRT).isoformat()
+            task_id, final_status, completed_at=datetime.now(BRT).isoformat()
         )
 
         # Cleanup
         self.active_tasks.pop(task_id, None)
         self.task_cancellation.pop(task_id, None)
 
-        add_log(f"Tarefa finalizada: {counters['success']} enviados, {counters['failed']} falhas", "concluido")
+        add_log(
+            f"Tarefa finalizada: {counters['success']} enviados, {counters['failed']} falhas",
+            "concluido",
+        )
