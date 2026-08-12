@@ -25,6 +25,7 @@ class AtypicalService:
         self.db = Database()
         self.active_tasks = {}  # task_id -> thread
         self.task_cancellation = {}  # task_id -> Event (para cancelar)
+        self.task_pause = {}  # task_id -> Event (para pausar)
         self._scheduler_thread = None
         self._scheduler_running = False
         self._start_scheduler()
@@ -220,15 +221,33 @@ class AtypicalService:
         """Cancela uma tarefa"""
         if task_id in self.task_cancellation:
             self.task_cancellation[task_id].set()
+        if task_id in self.task_pause:
+            self.task_pause[task_id].clear()
         self.db.update_atypical_task_status(
             task_id, "cancelled", completed_at=datetime.now(BRT).isoformat()
         )
         return True
 
+    def pause_task(self, task_id):
+        """Pausa uma tarefa em execução (os workers param no próximo contato)"""
+        if task_id in self.task_pause:
+            self.task_pause[task_id].set()
+        self.db.update_atypical_task_status(task_id, "paused")
+        return True
+
+    def resume_task(self, task_id):
+        """Retoma uma tarefa pausada de onde parou"""
+        if task_id in self.task_pause:
+            self.task_pause[task_id].clear()
+        self.db.update_atypical_task_status(task_id, "running")
+        return True
+
     def _launch_task(self, task_id):
         """Lança a thread que processa a tarefa"""
         cancel_event = threading.Event()
+        pause_event = threading.Event()
         self.task_cancellation[task_id] = cancel_event
+        self.task_pause[task_id] = pause_event
         t = threading.Thread(
             target=self._execute_task, args=(task_id, cancel_event), daemon=True
         )
@@ -308,6 +327,14 @@ class AtypicalService:
             sender_ref = sender["ref_numero"]
 
             while True:
+                if cancel_event.is_set():
+                    break
+
+                # Aguarda retomada caso a tarefa esteja pausada
+                while self.task_pause.get(task_id, threading.Event()).is_set():
+                    time.sleep(0.5)
+                    if cancel_event.is_set():
+                        break
                 if cancel_event.is_set():
                     break
 
@@ -409,6 +436,13 @@ class AtypicalService:
                     if reg_resp.get("code") == 201 and chat_add_id:
                         chat_pronto = False
                         for _ in range(45):
+                            if cancel_event.is_set():
+                                break
+                            # Aguarda retomada caso a tarefa esteja pausada
+                            while self.task_pause.get(task_id, threading.Event()).is_set():
+                                time.sleep(0.5)
+                                if cancel_event.is_set():
+                                    break
                             if cancel_event.is_set():
                                 break
                             time.sleep(1)
@@ -544,6 +578,7 @@ class AtypicalService:
         # Cleanup
         self.active_tasks.pop(task_id, None)
         self.task_cancellation.pop(task_id, None)
+        self.task_pause.pop(task_id, None)
 
         add_log(
             f"Tarefa finalizada: {counters['success']} enviados, {counters['failed']} falhas",

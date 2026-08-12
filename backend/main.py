@@ -432,6 +432,22 @@ def get_atypical_task_status(task_id: int, current_user: dict = Depends(get_curr
         raise HTTPException(status_code=404, detail="Tarefa não encontrada")
     return task
 
+@app.post("/atypical/tasks/{task_id}/pause")
+def pause_atypical_task(task_id: int, current_user: dict = Depends(get_current_user)):
+    task = global_db.get_atypical_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    atypical_service.pause_task(task_id)
+    return {"message": "Tarefa pausada"}
+
+@app.post("/atypical/tasks/{task_id}/resume")
+def resume_atypical_task(task_id: int, current_user: dict = Depends(get_current_user)):
+    task = global_db.get_atypical_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    atypical_service.resume_task(task_id)
+    return {"message": "Tarefa retomada"}
+
 @app.delete("/atypical/tasks/{task_id}")
 def cancel_atypical_task(task_id: int, current_user: dict = Depends(get_current_user)):
     atypical_service.cancel_task(task_id)

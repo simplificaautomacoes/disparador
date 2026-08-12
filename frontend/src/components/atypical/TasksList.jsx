@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { CheckCircle, XCircle, Clock, Loader2, Trash2, Activity } from 'lucide-react';
+import { CheckCircle, XCircle, Clock, Loader2, Trash2, Activity, Pause, Play } from 'lucide-react';
 
 const TasksList = () => {
     const [tasks, setTasks] = useState([]);
@@ -26,10 +26,21 @@ const TasksList = () => {
         fetchTasks();
     };
 
+    const pauseTask = async (id) => {
+        await axios.post(`/api/atypical/tasks/${id}/pause`);
+        fetchTasks();
+    };
+
+    const resumeTask = async (id) => {
+        await axios.post(`/api/atypical/tasks/${id}/resume`);
+        fetchTasks();
+    };
+
     const getStatusBadge = (status) => {
         const map = {
             pending: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'Iniciando...' },
             running: { bg: 'bg-lime-500/20', text: 'text-lime-400', label: 'Executando' },
+            paused: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: 'Pausado' },
             scheduled: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: 'Agendado' },
             done: { bg: 'bg-green-500/20', text: 'text-green-400', label: 'Concluído' },
             cancelled: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Cancelado' },
@@ -42,6 +53,7 @@ const TasksList = () => {
     const getStatusIcon = (status) => {
         switch (status) {
             case 'running': return <Loader2 size={20} className="text-lime-400 animate-spin" />;
+            case 'paused': return <Pause size={20} className="text-yellow-400" />;
             case 'scheduled': return <Clock size={20} className="text-yellow-400" />;
             case 'done': return <CheckCircle size={20} className="text-green-400" />;
             case 'cancelled': case 'failed': return <XCircle size={20} className="text-red-400" />;
@@ -72,10 +84,11 @@ const TasksList = () => {
             {tasks.map(task => {
                 const pct = task.total > 0 ? Math.round((task.processed / task.total) * 100) : 0;
                 const isActive = task.status === 'running' || task.status === 'pending';
+                const isPaused = task.status === 'paused';
                 const isScheduled = task.status === 'scheduled';
 
                 return (
-                    <div key={task.id} className={`bg-dark-800 rounded-xl border p-5 transition-all ${isActive ? 'border-lime-500/50' : 'border-dark-700'}`}>
+                    <div key={task.id} className={`bg-dark-800 rounded-xl border p-5 transition-all ${isActive ? 'border-lime-500/50' : isPaused ? 'border-yellow-500/50' : 'border-dark-700'}`}>
                         <div className="flex justify-between items-start mb-3">
                             <div className="flex items-center gap-3">
                                 {getStatusIcon(task.status)}
@@ -90,10 +103,22 @@ const TasksList = () => {
                                     </p>
                                 </div>
                             </div>
-                            {(isActive || isScheduled) && (
-                                <button onClick={() => cancelTask(task.id)} className="text-red-500 hover:text-red-400 p-2 rounded-lg hover:bg-dark-700 transition-colors" title="Cancelar">
-                                    <Trash2 size={18} />
-                                </button>
+                            {(isActive || isPaused || isScheduled) && (
+                                <div className="flex items-center gap-1">
+                                    {isActive && !isPaused && (
+                                        <button onClick={() => pauseTask(task.id)} className="text-yellow-500 hover:text-yellow-400 p-2 rounded-lg hover:bg-dark-700 transition-colors" title="Pausar">
+                                            <Pause size={18} />
+                                        </button>
+                                    )}
+                                    {isPaused && (
+                                        <button onClick={() => resumeTask(task.id)} className="text-lime-500 hover:text-lime-400 p-2 rounded-lg hover:bg-dark-700 transition-colors" title="Retomar">
+                                            <Play size={18} />
+                                        </button>
+                                    )}
+                                    <button onClick={() => cancelTask(task.id)} className="text-red-500 hover:text-red-400 p-2 rounded-lg hover:bg-dark-700 transition-colors" title="Cancelar">
+                                        <Trash2 size={18} />
+                                    </button>
+                                </div>
                             )}
                         </div>
 
@@ -114,14 +139,14 @@ const TasksList = () => {
                         </div>
 
                         {/* Progress bar */}
-                        {(isActive || task.status === 'done') && task.total > 0 && (
+                        {(isActive || isPaused || task.status === 'done') && task.total > 0 && (
                             <div className="mb-3">
                                 <div className="flex justify-between text-xs text-gray-500 mb-1">
                                     <span>Progresso</span>
                                     <span>{pct}%</span>
                                 </div>
                                 <div className="w-full bg-dark-700 rounded-full h-2">
-                                    <div className={`h-2 rounded-full transition-all duration-500 ${task.status === 'done' ? 'bg-green-500' : 'bg-lime-500'}`}
+                                    <div className={`h-2 rounded-full transition-all duration-500 ${task.status === 'done' ? 'bg-green-500' : isPaused ? 'bg-yellow-500' : 'bg-lime-500'}`}
                                         style={{ width: `${pct}%` }} />
                                 </div>
                             </div>
