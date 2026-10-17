@@ -57,7 +57,10 @@ class SenderUpdateData(BaseModel):
     dialogos: List[str]
     ref_numero: Optional[str] = None
     sent_count: Optional[int] = None
-    daily_limit: Optional[int] = 0
+    # None = "nao mexe no limite". O dono do limite diario e a tela
+    # Limites e qualidade; se aqui viesse 0 por padrao, salvar os dialogos
+    # apagaria o limite que a pessoa acabara de ajustar.
+    daily_limit: Optional[int] = None
 
 class ConfigUpdate(BaseModel):
     id_numeros: Dict[str, SenderUpdateData]
@@ -293,9 +296,14 @@ def get_config(current_user: dict = Depends(get_current_user)):
 
 @app.post("/config")
 def update_config(config: ConfigUpdate, current_user: dict = Depends(get_current_user)):
+    # Regra: o limite diário tem DONO ÚNICO — a tela "Limites e qualidade".
+    # Aqui só alteramos o limite se o front mandou o campo explicitamente
+    # (None = "nao mexe"). Sem isso, salvar os dialogos/status desviava o
+    # limite que a pessoa acabou de ajustar e parecia "nao salvou".
     for sender_id, data in config.id_numeros.items():
         global_db.update_sender_status(sender_id, data.status)
-        global_db.update_sender_daily_limit(sender_id, data.daily_limit or 0)
+        if data.daily_limit is not None:
+            global_db.update_sender_daily_limit(sender_id, data.daily_limit or 0)
         existing = global_db.get_senders()["id_numeros"].get(sender_id, {})
         existing_dialogs = existing.get("dialogos", [])
         new_dialogs = data.dialogos
@@ -487,6 +495,12 @@ def create_atypical_task(data: AtypicalTaskCreate, current_user: dict = Depends(
 def get_atypical_tasks(current_user: dict = Depends(get_current_user)):
     return global_db.get_atypical_tasks()
 
+
+@app.get("/atypical/tasks/summary")
+def get_atypical_tasks_summary(current_user: dict = Depends(get_current_user)):
+    """Lista leve: sem o historico inteiro de logs (a tela usa so os 5 primeiros)."""
+    return global_db.get_atypical_tasks_summary()
+
 @app.get("/atypical/tasks/{task_id}")
 def get_atypical_task_status(task_id: int, current_user: dict = Depends(get_current_user)):
     task = global_db.get_atypical_task(task_id)
@@ -595,6 +609,8 @@ def save_sender_limits(data: SenderLimitsUpdate, current_user: dict = Depends(ge
     from rate_limit import get_limiter
     limiter = get_limiter(global_db)
     saved = {}
+    # carrega uma vez: antes era get_senders() dentro do loop
+    todos_senders = global_db.get_senders().get("id_numeros", {})
     for sender_id, patch in (data.limits or {}).items():
         clean = {}
         for field, cast in (("per_second", float), ("hourly", int), ("daily", int),
@@ -608,7 +624,10 @@ def save_sender_limits(data: SenderLimitsUpdate, current_user: dict = Depends(ge
             clean[field] = max(0, value) if field != "per_second" else max(0.0, value)
         if not clean:
             continue
-        global_db.update_sender_status(sender_id, (global_db.get_senders()["id_numeros"].get(sender_id) or {}).get("status", "ativado"))
+        global_db.update_sender_status(
+            sender_id,
+            (todos_senders.get(sender_id) or {}).get("status", "ativado"),
+        )
         global_db.update_sender_daily_limit(sender_id, clean.get("daily", 0))
         db_patch = {
             "hourly_limit": clean.get("hourly", 0),
@@ -616,8 +635,7 @@ def save_sender_limits(data: SenderLimitsUpdate, current_user: dict = Depends(ge
             "meta_daily_cap": clean.get("meta_daily_cap", 0),
             "auto_pause_failures": clean.get("auto_pause_failures", 5) or 5,
         }
-        global_db.update_sender_vendeai if hasattr(global_db, "update_sender_vendeai") else None
-        # chatguru db has no update_sender_vendeai; patch columns directly
+        # grava as colunas novas direto (nao existe update_sender_vendeai neste banco)
         with global_db.lock:
             conn = global_db._get_conn()
             cursor = conn.cursor()
@@ -696,8 +714,8 @@ def diagnostico(current_user: dict = Depends(get_current_user)):
     limiter = get_limiter(global_db)
     limiter.seed()
     com_limite = 0
-    for s in senders_ativos:
-        lim = global_db.get_sender_limits(s and list(senders.keys())[list(senders.values()).index(s)])
+    for _sid in list(senders.keys()):
+        lim = global_db.get_sender_limits(_sid)
         if (lim.get("hourly_limit") or lim.get("daily_limit")
                 or lim.get("per_second_limit") or lim.get("meta_daily_cap")):
             com_limite += 1

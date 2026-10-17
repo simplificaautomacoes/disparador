@@ -215,6 +215,30 @@ class Database:
                 )
             ''')
 
+            # Índices — precisam ficar DEPOIS das tabelas existirem, senão
+            # o CREATE falha em silêncio e o painel volta a fazer full scan em
+            # message_log (centenas de milhares de linhas).
+            for _idx in (
+                "CREATE INDEX IF NOT EXISTS idx_message_log_sender ON message_log(sender_id)",
+                "CREATE INDEX IF NOT EXISTS idx_message_log_status ON message_log(status)",
+                "CREATE INDEX IF NOT EXISTS idx_message_log_date ON message_log(date)",
+                "CREATE INDEX IF NOT EXISTS idx_message_log_sender_status_date "
+                "ON message_log(sender_id, status, date)",
+                # esta e a que resolve o GROUP BY do painel/diagnostico:
+                # o status na PRIMEIRA coluna vira um indice cobrente
+                # (426 ms -> 96 ms em 280 mil linhas).
+                "CREATE INDEX IF NOT EXISTS idx_message_log_status_sender_date "
+                "ON message_log(status, sender_id, date)",
+                "CREATE INDEX IF NOT EXISTS idx_message_log_timestamp ON message_log(timestamp)",
+                "CREATE INDEX IF NOT EXISTS idx_lead_esteira_lead_id ON lead_esteira_log(lead_id)",
+                "CREATE INDEX IF NOT EXISTS idx_lead_esteira_status ON lead_esteira_log(status)",
+                "CREATE INDEX IF NOT EXISTS idx_sender_dialogs_sender ON sender_dialogs(sender_id)",
+            ):
+                try:
+                    cursor.execute(_idx)
+                except sqlite3.OperationalError as _e:
+                    print(f"Indice nao criado ({_idx.split()[5]}): {_e}")
+
             conn.commit()
             conn.close()
 
@@ -291,24 +315,34 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM senders")
             rows = cursor.fetchall()
-            
+
+            today = datetime.now(BRT).strftime("%Y-%m-%d")
+
+            # Uma unica query para TODAS as contagens. Antes eram 2 queries por
+            # numero (46 no total), cada uma um full scan em message_log —
+            # com ~280 mil linhas isso levava segundos.
+            cursor.execute(
+                """SELECT sender_id,
+                          count(*) AS total_ok,
+                          sum(CASE WHEN date = ? THEN 1 ELSE 0 END) AS hoje_ok
+                   FROM message_log WHERE status = 'success' GROUP BY sender_id""",
+                (today,),
+            )
+            contagens = {r[0]: (r[1], r[2] or 0) for r in cursor.fetchall()}
+
+            # Diálogos de todos os números em uma query
+            cursor.execute("SELECT sender_id, dialog_id FROM sender_dialogs")
+            dialogos_por_sender = {}
+            for r in cursor.fetchall():
+                dialogos_por_sender.setdefault(r[0], []).append(r[1])
+
             result = {}
             for row in rows:
                 sender_id = row["id"]
-                # Get dialogs
-                cursor.execute("SELECT dialog_id FROM sender_dialogs WHERE sender_id = ?", (sender_id,))
-                dialogs = [d[0] for d in cursor.fetchall()]
-                
-                # Get stats (count success in message_log + legacy)
-                cursor.execute("SELECT count(*) FROM message_log WHERE sender_id = ? AND status = 'success'", (sender_id,))
-                log_count = cursor.fetchone()[0]
-                
+                dialogs = dialogos_por_sender.get(sender_id, [])
+
+                log_count, today_count = contagens.get(sender_id, (0, 0))
                 total_count = log_count + (row["legacy_success_count"] or 0)
- 
-                # Get daily dispatches today (Brasilia Time)
-                today = datetime.now(BRT).strftime("%Y-%m-%d")
-                cursor.execute("SELECT count(*) FROM message_log WHERE sender_id = ? AND status = 'success' AND date = ?", (sender_id, today))
-                today_count = cursor.fetchone()[0]
  
                 def _col(name, default=0):
                     try:
@@ -515,11 +549,24 @@ class Database:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             try:
-                cursor.execute("SELECT sender_id, status, details FROM message_log WHERE timestamp >= ?",
-                               (since_iso,))
+                # Agrega no proprio banco: traz poucos grupos em vez de uma
+                # linha por envio (dezenas de milhares em 24h).
+                cursor.execute(
+                    """SELECT sender_id, status, details, count(*) AS qtd
+                       FROM message_log WHERE timestamp >= ?
+                       GROUP BY sender_id, status, details""",
+                    (since_iso,),
+                )
             except sqlite3.OperationalError:
                 conn.close()
                 return out
+
+            try:
+                from rate_limit import classify_error
+            except Exception:
+                classify_error = None
+
+            cache = {}
             for row in cursor.fetchall():
                 if not row["sender_id"]:
                     continue
@@ -527,12 +574,19 @@ class Database:
                 if row["status"] == "success":
                     klass = "delivered"
                 else:
-                    try:
-                        from rate_limit import classify_error
-                        klass = classify_error({"description": row["details"] or ""})[0]
-                    except Exception:
+                    det = row["details"] or ""
+                    if det in cache:
+                        klass = cache[det]
+                    elif classify_error:
+                        try:
+                            klass = classify_error({"description": det})[0]
+                        except Exception:
+                            klass = "soft"
+                    else:
                         klass = "soft"
-                bucket[klass] = bucket.get(klass, 0) + 1
+                    cache[det] = klass
+                qtd = int(row["qtd"] or 0)
+                bucket[klass] = bucket.get(klass, 0) + qtd
             conn.close()
         return out
 
@@ -896,6 +950,46 @@ class Database:
             conn.commit()
             conn.close()
             return task_id
+
+    def get_atypical_tasks_summary(self, max_logs=5, limite=200):
+        """Versao leve da lista de tarefas: sem o JSON gigante de logs.
+
+        A tela so mostra os 5 primeiros logs de cada tarefa, entao trazer o
+        historico inteiro (megabytes) nao ajudava em nada e deixava a aba
+        Atipico lenta para abrir.
+        """
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            # colunas conforme o schema real de atypical_tasks
+            cursor.execute(
+                "SELECT id, status, scheduled_at, started_at, completed_at, "
+                "file_path, phone_column, phone_column_fallback, name_column, "
+                "note_template, column_mapping, created_at, created_by, "
+                "total, processed, success, failed, skipped, logs "
+                "FROM atypical_tasks ORDER BY created_at DESC LIMIT ?",
+                (int(limite),),
+            )
+            rows = cursor.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                # so os primeiros logs, cortados aqui no banco
+                try:
+                    todos = json.loads(r["logs"] or "[]")
+                    d["logs"] = todos[:max_logs]
+                    d["logs_total"] = len(todos)
+                except Exception:
+                    d["logs"] = []
+                    d["logs_total"] = 0
+                try:
+                    d["column_mapping"] = json.loads(r["column_mapping"] or "{}")
+                except Exception:
+                    d["column_mapping"] = {}
+                result.append(d)
+            conn.close()
+            return result
 
     def get_atypical_tasks(self):
         with self.lock:

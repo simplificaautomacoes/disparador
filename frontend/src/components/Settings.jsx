@@ -35,6 +35,7 @@ const Settings = ({ token }) => {
     const [limits, setLimits] = useState({});
     const [qualityLoading, setQualityLoading] = useState(false);
     const [qualityMsg, setQualityMsg] = useState(null);
+    const [savingLimits, setSavingLimits] = useState(false);
 
     useEffect(() => {
         fetchConfig();
@@ -51,12 +52,36 @@ const Settings = ({ token }) => {
         }
     };
 
+    const [saving, setSaving] = useState(false);
+    const [configMsg, setConfigMsg] = useState(null);
+
     const saveConfig = async () => {
+        setSaving(true);
+        setConfigMsg(null);
         try {
-            await axios.post('/api/config', config);
-            alert("Configuração salva!");
+            // daily_limit fica de fora de proposito: quem manda no limite diario
+            // e a tela "Limites e qualidade". Sem isso, salvar os dialogos
+            // desviava o limite que a pessoa tinha acabado de ajustar.
+            const payload = {
+                id_numeros: Object.fromEntries(
+                    Object.entries(config.id_numeros || {}).map(([id, n]) => [
+                        id,
+                        { status: n.status, dialogos: n.dialogos },
+                    ])
+                ),
+            };
+            await axios.post('/api/config', payload);
+
+            // Confirma relendo do servidor: so mostra "salvou" se o valor
+            // realmente estiver la.
+            const confere = await axios.get('/api/config');
+            setConfig(confere.data);
+            setConfigMsg({ type: 'ok', text: 'Configuração salva!' });
         } catch (err) {
-            alert("Erro ao salvar configuração");
+            const detalhe = err.response?.data?.detail || err.message;
+            setConfigMsg({ type: 'erro', text: 'Erro ao salvar: ' + detalhe });
+        } finally {
+            setSaving(false);
         }
     };
 
@@ -193,14 +218,18 @@ const Settings = ({ token }) => {
                 auto_pause_failures: Math.max(0, Math.round(num(l.auto_pause_failures, 5))),
             };
         });
+        setSavingLimits(true);
         try {
             await axios.post('/api/senders/limits', { limits: payload });
-            setQualityMsg({ type: 'ok', text: 'Limites salvos!' });
+            // relê do servidor para a tela mostrar o que REALMENTE ficou
             await fetchQuality();
             runDiagnostics();
+            setQualityMsg({ type: 'ok', text: 'Limites salvos!' });
         } catch (err) {
-            console.error(err);
-            setQualityMsg({ type: 'erro', text: 'Erro ao salvar os limites.' });
+            const detalhe = err.response?.data?.detail || err.message;
+            setQualityMsg({ type: 'erro', text: 'Erro ao salvar os limites: ' + detalhe });
+        } finally {
+            setSavingLimits(false);
         }
     };
 
@@ -227,11 +256,25 @@ const Settings = ({ token }) => {
                 </div>
                 <button
                     onClick={saveConfig}
-                    className="flex items-center gap-2 px-6 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors"
+                    disabled={saving || !config}
+                    className="flex items-center gap-2 px-6 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                    <Save size={18} /> Salvar Alterações
+                    <Save size={18} /> {saving ? 'Salvando...' : 'Salvar Alterações'}
                 </button>
             </header>
+
+            {configMsg && (
+                <div
+                    className={
+                        'flex items-center gap-2 px-4 py-3 rounded-lg border text-sm ' +
+                        (configMsg.type === 'ok'
+                            ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                            : 'border-red-500/30 bg-red-500/10 text-red-400')
+                    }
+                >
+                    {configMsg.text}
+                </div>
+            )}
 
             <div className="bg-dark-800 rounded-xl border border-dark-700 p-6">
                 <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
@@ -475,9 +518,10 @@ const Settings = ({ token }) => {
                                     </button>
                                     <button
                                         onClick={saveLimits}
-                                        className="flex items-center gap-2 px-5 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors"
+                                        disabled={savingLimits || qualityLoading}
+                                        className="flex items-center gap-2 px-5 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                                     >
-                                        <Save size={16} /> Salvar limites
+                                        <Save size={16} /> {savingLimits ? 'Salvando...' : 'Salvar limites'}
                                     </button>
                                 </div>
                             </div>

@@ -14,7 +14,7 @@ const TasksList = () => {
 
     const fetchTasks = async () => {
         try {
-            const res = await axios.get('/api/atypical/tasks');
+            const res = await axios.get('/api/atypical/tasks/summary');
             setTasks(res.data);
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
