@@ -554,6 +554,9 @@ class Database:
         daily = int(out.get("daily_limit") or 0)
         cap = int(out.get("meta_daily_cap") or 0)
         out["effective_daily"] = min(daily, cap) if (daily and cap) else (daily or cap)
+        # o limitador em memoria precisa conhecer o daily_limit real, senao a
+        # tela de tetos mostrava o valor velho depois de salvar em /config
+        out.setdefault("daily_limit", daily)
         return out
 
     def get_sender_window_counts(self, today, hour_ago_iso):

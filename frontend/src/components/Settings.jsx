@@ -59,14 +59,19 @@ const Settings = ({ token }) => {
         setSaving(true);
         setConfigMsg(null);
         try {
-            // daily_limit fica de fora de proposito: quem manda no limite diario
-            // e a tela "Limites e qualidade". Sem isso, salvar os dialogos
-            // desviava o limite que a pessoa tinha acabado de ajustar.
+            // O limite diario e o mesmo campo nos dois lugares da tela (o cartao
+            // do remetente e a tabela de tetos), entao vai junto aqui. O que
+            // impede um de sobrescrever o outro e a sincronia: sempre que o
+            // limite muda em um lugar, ele e atualizado no outro tambem.
             const payload = {
                 id_numeros: Object.fromEntries(
                     Object.entries(config.id_numeros || {}).map(([id, n]) => [
                         id,
-                        { status: n.status, dialogos: n.dialogos },
+                        {
+                            status: n.status,
+                            dialogos: n.dialogos,
+                            daily_limit: Number.isFinite(n.daily_limit) ? n.daily_limit : 0,
+                        },
                     ])
                 ),
             };
@@ -200,6 +205,17 @@ const Settings = ({ token }) => {
             ...prev,
             [id]: { ...(prev[id] || {}), [key]: value }
         }));
+        if (key === 'daily') {
+            const num = parseInt(value);
+            const val = Number.isNaN(num) ? 0 : num;
+            setConfig(prev => (prev.id_numeros && prev.id_numeros[id]) ? ({
+                ...prev,
+                id_numeros: {
+                    ...prev.id_numeros,
+                    [id]: { ...prev.id_numeros[id], daily_limit: val },
+                },
+            }) : prev);
+        }
     };
 
     const saveLimits = async () => {
@@ -224,6 +240,14 @@ const Settings = ({ token }) => {
             // relê do servidor para a tela mostrar o que REALMENTE ficou
             await fetchQuality();
             runDiagnostics();
+            // espelha no config para o cartao do remetente mostrar o valor novo
+            setConfig(prev => {
+                const nums = { ...(prev.id_numeros || {}) };
+                Object.entries(payload).forEach(([id, l]) => {
+                    if (nums[id]) nums[id] = { ...nums[id], daily_limit: l.daily };
+                });
+                return { ...prev, id_numeros: nums };
+            });
             setQualityMsg({ type: 'ok', text: 'Limites salvos!' });
         } catch (err) {
             const detalhe = err.response?.data?.detail || err.message;
@@ -365,6 +389,13 @@ const Settings = ({ token }) => {
                                                             daily_limit: val
                                                         }
                                                     }
+                                                }));
+                                                // mesmo limite, outra aba da tela:
+                                                // mantem os dois em dia para um nao
+                                                // sobrescrever o outro ao salvar
+                                                setLimits(prev => ({
+                                                    ...prev,
+                                                    [id]: { ...(prev[id] || {}), daily: val },
                                                 }));
                                             }}
                                             className="w-24 bg-dark-800 border border-dark-700 text-white p-2 rounded-lg focus:outline-none focus:border-lime-500 text-center font-bold"

@@ -239,7 +239,9 @@ class SenderRateLimiter(object):
         now = now or self._now()
         with self._lock:
             st = self._state(sender_id)
-            if not st.limits:
+            if self.db is not None:
+                st.limits = self._limits_from_db(sender_id) or st.limits
+            elif not st.limits:
                 st.limits.update(self._limits_from_db(sender_id))
             self._prune(st, now)
 
@@ -319,8 +321,14 @@ class SenderRateLimiter(object):
         now = now or self._now()
         with self._lock:
             st = self._state(sender_id)
-            if not st.limits:
-                st.limits.update(self._limits_from_db(sender_id))
+            # Sempre relê do banco: os limites podem ter sido alterados por
+            # outra rota (ex.: /config) sem passar pelo limitador, e a tela
+            # precisa mostrar o valor real, nao um cache velho.
+            if self.db is not None:
+                st.limits = self._limits_from_db(sender_id) or st.limits
+            else:
+                if not st.limits:
+                    st.limits.update(self._limits_from_db(sender_id))
             self._prune(st, now)
 
             total = len(st.events)
