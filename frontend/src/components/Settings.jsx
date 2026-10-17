@@ -123,8 +123,6 @@ const Settings = ({ token }) => {
         }
     };
 
-    if (loading) return <div>Carregando...</div>;
-
     const runDiagnostics = async () => {
         setDiagLoading(true);
         try {
@@ -216,6 +214,9 @@ const Settings = ({ token }) => {
             setQualityMsg({ type: 'erro', text: 'Erro ao retomar o número.' });
         }
     };
+
+    // só depois de TODOS os hooks (senão o React quebra com erro #310)
+    if (loading) return <div>Carregando...</div>;
 
     return (
         <div className="p-8 space-y-8 pb-20">
