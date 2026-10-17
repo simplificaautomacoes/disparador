@@ -12,6 +12,7 @@ import SetupPage from './components/SetupPage';
 import LiveActivity from './components/LiveActivity';
 import DailyFailures from './components/DailyFailures';
 import AtypicalDispatcher from './components/AtypicalDispatcher';
+import Leilao from './components/Leilao';
 
 function App() {
     const [token, setToken] = useState(localStorage.getItem('token'));
@@ -86,6 +87,8 @@ function App() {
                 return <DailyFailures token={token} />;
             case 'atypical':
                 return <AtypicalDispatcher token={token} />;
+            case 'leilao':
+                return <Leilao token={token} />;
             default:
                 return <Dashboard token={token} />;
         }

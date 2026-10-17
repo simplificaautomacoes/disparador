@@ -1,10 +1,40 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
-import { Save, Plus, Trash2 } from 'lucide-react';
+import { Save, Plus, Trash2, Stethoscope, ChevronDown, ChevronUp, Play, RefreshCw, Info, CheckCircle } from 'lucide-react';
+
+const QUALITY_BADGE = {
+    verde: 'bg-green-500/20 text-green-400 border-green-500/30',
+    amarelo: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+    vermelho: 'bg-red-500/20 text-red-400 border-red-500/30',
+    desconhecido: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+};
+
+const DOT_COLOR = {
+    ok: 'bg-green-500',
+    aviso: 'bg-yellow-500',
+    erro: 'bg-red-500',
+};
+
+const LIMIT_FIELDS = [
+    { key: 'per_second', label: 'Por segundo', step: '0.1', hint: '0.5 = 1 msg a cada 2s' },
+    { key: 'hourly', label: 'Por hora', step: '1' },
+    { key: 'daily', label: 'Por dia', step: '1' },
+    { key: 'meta_daily_cap', label: 'Teto Meta/dia', step: '1' },
+    { key: 'auto_pause_failures', label: 'Pausar após N falhas', step: '1' },
+];
 
 const Settings = ({ token }) => {
     const [config, setConfig] = useState(null);
     const [loading, setLoading] = useState(true);
+
+    // ── Limites e qualidade dos números ──
+    const [showQuality, setShowQuality] = useState(false);
+    const [diag, setDiag] = useState(null);
+    const [diagLoading, setDiagLoading] = useState(false);
+    const [quality, setQuality] = useState({});
+    const [limits, setLimits] = useState({});
+    const [qualityLoading, setQualityLoading] = useState(false);
+    const [qualityMsg, setQualityMsg] = useState(null);
 
     useEffect(() => {
         fetchConfig();
@@ -94,6 +124,98 @@ const Settings = ({ token }) => {
     };
 
     if (loading) return <div>Carregando...</div>;
+
+    const runDiagnostics = async () => {
+        setDiagLoading(true);
+        try {
+            const res = await axios.get('/api/diagnostico');
+            setDiag(res.data);
+        } catch (err) {
+            console.error(err);
+            setQualityMsg({ type: 'erro', text: 'Não consegui rodar a verificação do sistema.' });
+        } finally {
+            setDiagLoading(false);
+        }
+    };
+
+    const fetchQuality = useCallback(async () => {
+        setQualityLoading(true);
+        try {
+            const res = await axios.get('/api/senders/quality');
+            const senders = res.data?.senders || {};
+            setQuality(senders);
+            const next = {};
+            Object.entries(senders).forEach(([id, info]) => {
+                const l = info?.limits || {};
+                next[id] = {
+                    per_second: l.per_second_limit ?? 0,
+                    hourly: l.hourly_limit ?? 0,
+                    daily: l.daily_limit ?? 0,
+                    meta_daily_cap: l.meta_daily_cap ?? 0,
+                    auto_pause_failures: l.auto_pause_failures ?? 5,
+                };
+            });
+            setLimits(next);
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setQualityLoading(false);
+        }
+    }, []);
+
+    const toggleQualitySection = () => {
+        const next = !showQuality;
+        setShowQuality(next);
+        if (next) {
+            fetchQuality();
+            runDiagnostics();
+        }
+    };
+
+    const setLimitField = (id, key, value) => {
+        setLimits(prev => ({
+            ...prev,
+            [id]: { ...(prev[id] || {}), [key]: value }
+        }));
+    };
+
+    const saveLimits = async () => {
+        setQualityMsg(null);
+        const payload = {};
+        Object.entries(limits).forEach(([id, l]) => {
+            const num = (v, fallback = 0) => {
+                const parsed = parseFloat(v);
+                return Number.isNaN(parsed) ? fallback : parsed;
+            };
+            payload[id] = {
+                per_second: Math.max(0, num(l.per_second)),
+                hourly: Math.max(0, Math.round(num(l.hourly))),
+                daily: Math.max(0, Math.round(num(l.daily))),
+                meta_daily_cap: Math.max(0, Math.round(num(l.meta_daily_cap))),
+                auto_pause_failures: Math.max(0, Math.round(num(l.auto_pause_failures, 5))),
+            };
+        });
+        try {
+            await axios.post('/api/senders/limits', { limits: payload });
+            setQualityMsg({ type: 'ok', text: 'Limites salvos!' });
+            await fetchQuality();
+            runDiagnostics();
+        } catch (err) {
+            console.error(err);
+            setQualityMsg({ type: 'erro', text: 'Erro ao salvar os limites.' });
+        }
+    };
+
+    const unpauseSender = async (id) => {
+        try {
+            await axios.post('/api/senders/unpause', { sender_id: id });
+            await fetchQuality();
+            runDiagnostics();
+        } catch (err) {
+            console.error(err);
+            setQualityMsg({ type: 'erro', text: 'Erro ao retomar o número.' });
+        }
+    };
 
     return (
         <div className="p-8 space-y-8 pb-20">
@@ -264,6 +386,190 @@ const Settings = ({ token }) => {
                         </div>
                     </div>
                 ))}
+            </div>
+
+            {/* ── Limites e qualidade dos números ─────────────────────── */}
+            <div className="bg-dark-800 rounded-xl border border-dark-700 overflow-hidden">
+                <button
+                    onClick={toggleQualitySection}
+                    className="w-full flex items-center justify-between p-6 hover:bg-dark-700/30 transition-colors"
+                >
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                        <Stethoscope size={20} className="text-lime-500" /> Limites e qualidade dos números
+                    </h3>
+                    {showQuality ? <ChevronUp size={20} className="text-gray-400" /> : <ChevronDown size={20} className="text-gray-400" />}
+                </button>
+
+                {showQuality && (
+                    <div className="px-6 pb-6 space-y-6 border-t border-dark-700 pt-6">
+                        {/* Diagnóstico */}
+                        <div>
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                                <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider">Verificação do sistema</h4>
+                                <button
+                                    onClick={runDiagnostics}
+                                    disabled={diagLoading}
+                                    className="flex items-center gap-2 px-4 py-2 bg-dark-900 hover:bg-dark-700 border border-dark-700 text-gray-300 hover:text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-60"
+                                >
+                                    <RefreshCw size={16} className={diagLoading ? 'animate-spin' : ''} />
+                                    {diagLoading ? 'Verificando...' : 'Verificar sistema'}
+                                </button>
+                            </div>
+
+                            {diag && (
+                                <div className="mt-4 space-y-3">
+                                    <div className={`flex items-center gap-2 px-4 py-3 rounded-lg border text-sm font-bold ${diag.pronto_para_disparar
+                                        ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                                        : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                                        {diag.pronto_para_disparar ? <CheckCircle size={18} /> : <Info size={18} />}
+                                        {diag.pronto_para_disparar
+                                            ? 'Tudo pronto para disparar'
+                                            : 'Tem problema para resolver antes de disparar'}
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-3 text-xs text-gray-400">
+                                        <span className="flex items-center gap-1.5">
+                                            <span className="w-2 h-2 rounded-full bg-green-500" /> {diag.resumo?.ok ?? 0} ok
+                                        </span>
+                                        <span className="flex items-center gap-1.5">
+                                            <span className="w-2 h-2 rounded-full bg-yellow-500" /> {diag.resumo?.aviso ?? 0} aviso
+                                        </span>
+                                        <span className="flex items-center gap-1.5">
+                                            <span className="w-2 h-2 rounded-full bg-red-500" /> {diag.resumo?.erro ?? 0} erro
+                                        </span>
+                                        {(diag.numeros_pausados?.length || 0) > 0 && (
+                                            <span className="flex items-center gap-1.5 text-red-400">
+                                                pausados: {diag.numeros_pausados.join(', ')}
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-dark-900 rounded-lg border border-dark-700 divide-y divide-dark-700">
+                                        {(diag.checks || []).map((c, i) => (
+                                            <div key={i} className="flex items-start gap-3 px-4 py-3">
+                                                <span className={`w-2.5 h-2.5 rounded-full mt-1.5 flex-shrink-0 ${DOT_COLOR[c.estado] || 'bg-gray-500'}`} />
+                                                <div className="min-w-0">
+                                                    <p className="text-white font-medium text-sm">{c.nome}</p>
+                                                    <p className="text-gray-500 text-xs break-words">{c.detalhe}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Limites por número */}
+                        <div>
+                            <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+                                <h4 className="text-sm font-medium text-gray-400 uppercase tracking-wider">Tetos por número</h4>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={fetchQuality}
+                                        disabled={qualityLoading}
+                                        className="flex items-center gap-2 px-4 py-2 bg-dark-900 hover:bg-dark-700 border border-dark-700 text-gray-300 hover:text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-60"
+                                    >
+                                        <RefreshCw size={16} className={qualityLoading ? 'animate-spin' : ''} />
+                                        Atualizar
+                                    </button>
+                                    <button
+                                        onClick={saveLimits}
+                                        className="flex items-center gap-2 px-5 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg font-bold transition-colors"
+                                    >
+                                        <Save size={16} /> Salvar limites
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="flex items-start gap-2 px-4 py-3 mb-4 rounded-lg border border-lime-500/20 bg-lime-500/10 text-lime-400 text-sm">
+                                <Info size={16} className="mt-0.5 flex-shrink-0" />
+                                <span>
+                                    Teto é por NÚMERO. Ao bater, o contato passa para outro número. O que sobrar vira 'pulado', nunca falha.
+                                </span>
+                            </div>
+
+                            {qualityMsg && (
+                                <div className={`flex items-center gap-2 px-4 py-2.5 mb-4 rounded-lg border text-sm font-medium ${qualityMsg.type === 'erro'
+                                    ? 'bg-red-500/10 border-red-500/30 text-red-400'
+                                    : 'bg-lime-500/10 border-lime-500/30 text-lime-400'}`}>
+                                    {qualityMsg.text}
+                                </div>
+                            )}
+
+                            {Object.keys(quality).length === 0 ? (
+                                <p className="text-gray-500 text-sm italic py-6 text-center">
+                                    {qualityLoading ? 'Carregando...' : 'Nenhum número cadastrado.'}
+                                </p>
+                            ) : (
+                                <div className="space-y-4">
+                                    {Object.entries(quality).map(([id, info]) => {
+                                        const q = info?.quality || {};
+                                        const l = limits[id] || {};
+                                        const isPaused = !!q.paused;
+                                        const level = q.level || 'desconhecido';
+                                        const hour = q.hour || {};
+                                        const day = q.day || {};
+                                        return (
+                                            <div
+                                                key={id}
+                                                className={`bg-dark-900 rounded-lg border p-4 ${isPaused ? 'border-red-500/70' : 'border-dark-700'}`}
+                                            >
+                                                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                                                    <div className="flex items-center gap-3">
+                                                        <h5 className="text-lg font-bold text-white">{info?.ref_numero || id}</h5>
+                                                        <span className={`text-xs px-2.5 py-1 rounded-full font-bold border ${QUALITY_BADGE[level] || QUALITY_BADGE.desconhecido}`}>
+                                                            {q.label || level}
+                                                        </span>
+                                                        {q.score !== null && q.score !== undefined && (
+                                                            <span className="text-xs text-gray-500 font-mono">{q.score}/100</span>
+                                                        )}
+                                                    </div>
+                                                    {isPaused && (
+                                                        <button
+                                                            onClick={() => unpauseSender(id)}
+                                                            className="flex items-center gap-2 px-4 py-2 bg-lime-500 hover:bg-lime-600 text-dark-900 rounded-lg text-sm font-bold transition-colors"
+                                                        >
+                                                            <Play size={16} /> Retomar este número
+                                                        </button>
+                                                    )}
+                                                </div>
+
+                                                {isPaused && q.paused_reason && (
+                                                    <p className="text-red-400 text-sm mb-3">
+                                                        Pausado: {q.paused_reason}
+                                                    </p>
+                                                )}
+
+                                                <div className="flex flex-wrap gap-3 mb-4">
+                                                    {LIMIT_FIELDS.map((f) => (
+                                                        <div key={f.key}>
+                                                            <label className="block text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1">
+                                                                {f.label}
+                                                            </label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                step={f.step}
+                                                                value={l[f.key] ?? 0}
+                                                                onChange={(e) => setLimitField(id, f.key, e.target.value)}
+                                                                className="w-full sm:w-28 bg-dark-800 border border-dark-700 text-white p-2 rounded-lg focus:outline-none focus:border-lime-500 text-center font-bold"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                <p className="text-gray-500 text-xs -mt-2 mb-3">{LIMIT_FIELDS[0].hint}</p>
+
+                                                <p className="text-gray-400 text-sm">
+                                                    {hour.used ?? 0}/{hour.limit ?? 0} na hora, {day.used ?? 0}/{day.limit ?? 0} no dia
+                                                </p>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );
