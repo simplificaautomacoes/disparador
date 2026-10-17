@@ -296,30 +296,27 @@ def get_config(current_user: dict = Depends(get_current_user)):
 
 @app.post("/config")
 def update_config(config: ConfigUpdate, current_user: dict = Depends(get_current_user)):
-    # Regra: o limite diário tem DONO ÚNICO — a tela "Limites e qualidade".
-    # Aqui só alteramos o limite se o front mandou o campo explicitamente
+    # Regra: o limite diario tem DONO UNICO — a tela "Limites e qualidade".
+    # Aqui so alteramos o limite se o front mandou o campo explicitamente
     # (None = "nao mexe"). Sem isso, salvar os dialogos/status desviava o
     # limite que a pessoa acabou de ajustar e parecia "nao salvou".
-    for sender_id, data in config.id_numeros.items():
-        global_db.update_sender_status(sender_id, data.status)
-        if data.daily_limit is not None:
-            global_db.update_sender_daily_limit(sender_id, data.daily_limit or 0)
-        existing = global_db.get_senders()["id_numeros"].get(sender_id, {})
-        existing_dialogs = existing.get("dialogos", [])
-        new_dialogs = data.dialogos
-        
-        for d in new_dialogs:
-            if d not in existing_dialogs:
-                global_db.add_dialog(sender_id, d)
-        
-        for d in existing_dialogs:
-            if d not in new_dialogs:
-                global_db.remove_dialog(sender_id, d)
+    #
+    # Tudo numa transacao so: antes abria/fechava conexao com commit varias
+    # vezes por numero e ainda chamava get_senders() inteiro dentro do laco
+    # (o que deixava o botao "Salvar" levando mais de 1 segundo).
+    global_db.apply_senders_config({
+        sender_id: {
+            "status": data.status,
+            "dialogos": data.dialogos,
+            "daily_limit": data.daily_limit,
+        }
+        for sender_id, data in config.id_numeros.items()
+    })
 
     # Reload config in all active services so subsequent pushes grab new statuses
     for svc in user_services.values():
         svc.reload_config()
-    return {"message": "Configuração atualizada"}
+    return {"message": "Configuracao atualizada"}
 
 @app.post("/senders")
 def add_sender(sender: dict, current_user: dict = Depends(get_current_user)):

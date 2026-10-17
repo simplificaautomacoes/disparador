@@ -431,6 +431,48 @@ class Database:
             conn.commit()
             conn.close()
 
+    def apply_senders_config(self, updates):
+        """Aplica status/dialogos de varios numeros numa transacao so.
+
+        Antes o POST /config abria e fechava conexao (com commit) varias vezes
+        por numero e ainda chamava get_senders() inteiro dentro do laco.
+        """
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("SELECT sender_id, dialog_id FROM sender_dialogs")
+                atuais = {}
+                for sid, did in cursor.fetchall():
+                    atuais.setdefault(sid, set()).add(did)
+
+                for sender_id, data in (updates or {}).items():
+                    cursor.execute(
+                        "UPDATE senders SET status = ? WHERE id = ?",
+                        (data.get("status"), sender_id),
+                    )
+                    if data.get("daily_limit") is not None:
+                        cursor.execute(
+                            "UPDATE senders SET daily_limit = ? WHERE id = ?",
+                            (data.get("daily_limit") or 0, sender_id),
+                        )
+
+                    novos = set(d for d in (data.get("dialogos") or []) if d)
+                    velhos = atuais.get(sender_id, set())
+                    for d in (novos - velhos):
+                        cursor.execute(
+                            "INSERT INTO sender_dialogs (sender_id, dialog_id) VALUES (?, ?)",
+                            (sender_id, d),
+                        )
+                    for d in (velhos - novos):
+                        cursor.execute(
+                            "DELETE FROM sender_dialogs WHERE sender_id = ? AND dialog_id = ?",
+                            (sender_id, d),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+
     def add_dialog(self, sender_id, dialog_id):
         with self.lock:
             conn = self._get_conn()
