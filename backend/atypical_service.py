@@ -14,6 +14,7 @@ import queue
 import re
 from datetime import datetime, timezone, timedelta
 from database import Database
+from rate_limit import get_limiter, classify_error
 
 
 # Fuso horário de Brasília (UTC-3)
@@ -338,10 +339,21 @@ class AtypicalService:
                 if cancel_event.is_set():
                     break
 
-                # Check if daily limit reached
-                if self.db.has_sender_reached_limit(sender_id):
+                # Limitadores por número (segundo/hora/dia)
+                limiter = get_limiter(self.db)
+                limiter.seed()
+                limiter.configure(sender_id,
+                                  per_second_limit=sender.get("per_second_limit") or 0,
+                                  hourly_limit=sender.get("hourly_limit") or 0,
+                                  daily_limit=sender.get("daily_limit") or 0,
+                                  meta_daily_cap=sender.get("meta_daily_cap") or 0)
+                decision = limiter.check(sender_id)
+                if not decision.allowed:
+                    if decision.wait > 0 and decision.reason == "por_segundo":
+                        time.sleep(min(decision.wait, 5.0))
+                        continue
                     add_log(
-                        f"Remetente {sender_ref} atingiu o limite diário. Interrompendo novos envios deste número hoje.",
+                        f"Remetente {sender_ref} no {decision.reason} — interrompendo novos envios deste número.",
                         "falha",
                     )
                     break
@@ -416,6 +428,7 @@ class AtypicalService:
 
                 if resp.get("code") == 200:
                     sucesso_envio = True
+                    limiter.record(sender_id, ok=True)
                     add_log(
                         f"Enviado direto: {nome or numero_final} via {sender_ref}",
                         "enviado",
@@ -428,6 +441,7 @@ class AtypicalService:
                     chat_add_id = reg_resp.get("chat_add_id")
 
                     if not chat_add_id or reg_resp.get("code") != 201:
+                        limiter.record(sender_id, ok=False, kind=classify_error(reg_resp)[0])
                         fallback_num = num_12 if numero_final == num_13 else num_13
                         reg_resp = self.cadastrar_chat(fallback_num, nome, sender_id)
                         chat_add_id = reg_resp.get("chat_add_id")
@@ -480,12 +494,15 @@ class AtypicalService:
                                 "cadastrado",
                             )
                         else:
+                            limiter.record(sender_id, ok=False, kind=classify_error(resp_reenvio)[0])
                             add_log(
                                 f"Falha pós-cadastro: {nome or numero_final}", "falha"
                             )
                     else:
+                        limiter.record(sender_id, ok=False, kind=classify_error(reg_resp)[0])
                         add_log(f"Cadastro falhou: {nome or numero_final}", "falha")
                 else:
+                    limiter.record(sender_id, ok=False, kind=classify_error(resp)[0])
                     add_log(
                         f"Erro API: {nome or numero_final} - {resp.get('description', 'Erro')}",
                         "falha",

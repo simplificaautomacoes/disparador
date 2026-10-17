@@ -19,6 +19,7 @@ import io
 
 from database import Database
 from atypical_service import AtypicalService
+from leilao_service import LeilaoService, LeilaoLead
 
 app = FastAPI()
 
@@ -34,6 +35,7 @@ global_db = Database()
 global_db.import_from_json()
 
 atypical_service = AtypicalService()
+leilao_service = LeilaoService(global_db)
 
 user_services: Dict[str, DispatcherService] = {}
 
@@ -46,6 +48,9 @@ init_master_user()
 
 class StartRequest(BaseModel):
     sheet_name: str
+    interval_seconds: Optional[float] = None
+    note_template: Optional[str] = None
+    column_mapping: Dict[str, Any] = {}
 
 class SenderUpdateData(BaseModel):
     status: str
@@ -163,11 +168,26 @@ def start_dispatch(req: StartRequest, current_user: dict = Depends(get_current_u
         if not svc.current_file_path:
             raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
         
+        if (req.interval_seconds is not None or req.note_template is not None
+                or req.column_mapping):
+            global_db.set_dispatch_config(
+                req.sheet_name,
+                note_template=req.note_template,
+                column_mapping=req.column_mapping or None,
+                interval_seconds=req.interval_seconds,
+            )
+
         if getattr(svc, 'paused', False) and svc.status.get("current_sheet") == req.sheet_name:
             svc.paused = False
             svc.stop_event.clear()
         else:
             svc.load_data(svc.current_file_path, sheet_name=req.sheet_name)
+            if req.interval_seconds is not None:
+                svc.dispatch_config["interval_seconds"] = req.interval_seconds
+            if req.note_template is not None:
+                svc.dispatch_config["note_template"] = req.note_template
+            if req.column_mapping:
+                svc.dispatch_config["column_mapping"] = req.column_mapping
             
         svc.start(user_email=current_user["email"])
         return {"message": f"Disparador iniciado na aba: {req.sheet_name}"}
@@ -179,6 +199,28 @@ def stop_dispatch(current_user: dict = Depends(get_current_user)):
     svc = get_user_service(current_user["email"])
     svc.stop()
     return {"message": "Dispatcher stopped"}
+
+
+def _sheet_info(file_path, sheet_names, sample_rows=5):
+    """Colunas, amostra de linhas e total de cada aba. Alimenta a UI de anotacao."""
+    out = []
+    for name in sheet_names:
+        info = {"name": name, "columns": [], "sample": [], "total": 0}
+        try:
+            df = pd.read_excel(file_path, sheet_name=name)
+            df.columns = [str(c).strip() for c in df.columns]
+            info["columns"] = list(df.columns)
+            info["total"] = int(len(df))
+            head = df.head(sample_rows).fillna("")
+            info["sample"] = [
+                {c: ("" if pd.isna(row.get(c)) else str(row.get(c))) for c in df.columns}
+                for _, row in head.iterrows()
+            ]
+        except Exception as e:
+            info["error"] = str(e)[:200]
+        out.append(info)
+    return out
+
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
@@ -192,7 +234,13 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         svc = get_user_service(current_user["email"])
         svc.current_file_path = file_location
         svc.status["completed_sheets"] = []
-        return {"message": f"Arquivo {file.filename} enviado com sucesso.", "sheets": xls.sheet_names, "filename": file.filename}
+        sheets_info = _sheet_info(file_location, xls.sheet_names)
+        return {"message": f"Arquivo {file.filename} enviado com sucesso.",
+                "sheets": xls.sheet_names,
+                "sheets_info": sheets_info,
+                "filename": file.filename,
+                "dispatch_config": global_db.get_dispatch_config(xls.sheet_names[0])
+                if xls.sheet_names else {}}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -215,7 +263,11 @@ def get_upload(current_user: dict = Depends(get_current_user)):
             xls = pd.ExcelFile(svc.current_file_path)
             safe_email_prefix = safe_email + "_"
             clean_filename = os.path.basename(svc.current_file_path).replace(safe_email_prefix, "")
-            return {"has_file": True, "filename": clean_filename, "sheets": xls.sheet_names}
+            sheets_info = _sheet_info(svc.current_file_path, xls.sheet_names)
+            return {"has_file": True, "filename": clean_filename,
+                    "sheets": xls.sheet_names, "sheets_info": sheets_info,
+                    "dispatch_config": global_db.get_dispatch_config(xls.sheet_names[0])
+                    if xls.sheet_names else {}}
         except:
             pass
     return {"has_file": False}
@@ -401,6 +453,16 @@ class AtypicalTaskCreate(BaseModel):
     scheduled_at: Optional[str] = None  # ISO format ou null para executar agora
     total: int = 0
 
+# ── Leilão (Esteira) ────────────────────────────────────────────────────────
+class LeilaoStateUpdate(BaseModel):
+    paused: Optional[bool] = None
+    interval_seconds: Optional[float] = None
+    note_template: Optional[str] = None
+
+class LeilaoDialogAdd(BaseModel):
+    sender_id: str
+    dialog_id: str
+
 @app.post("/atypical/tasks")
 def create_atypical_task(data: AtypicalTaskCreate, current_user: dict = Depends(get_current_user)):
     task_id = global_db.create_atypical_task(
@@ -459,3 +521,275 @@ def cancel_atypical_task(task_id: int, current_user: dict = Depends(get_current_
 def get_atypical_senders(current_user: dict = Depends(get_current_user)):
     """Retorna os remetentes do sistema principal para seleção nos templates atípicos"""
     return global_db.get_senders()
+
+
+# ── Leilão (Esteira) ────────────────────────────────────────────────────────
+
+@app.post("/webhook/leilao")
+def webhook_leilao(lead: LeilaoLead):
+    """Webhook do sistema externo (Leilão Ao Vivo). Sem auth — idempotente por lead_id."""
+    return leilao_service.receive_lead(lead.model_dump())
+
+
+@app.get("/leilao/state")
+def get_leilao_state(current_user: dict = Depends(get_current_user)):
+    st = global_db.get_leilao_state()
+    return {
+        "paused": bool(st.get("paused")),
+        "interval_seconds": st.get("interval_seconds", 1.0),
+        "note_template": st.get("note_template", ""),
+        "dialogs": global_db.get_leilao_dialogs(),
+        "webhook_url": "/api/webhook/leilao",
+    }
+
+
+@app.post("/leilao/state")
+def update_leilao_state(data: LeilaoStateUpdate, current_user: dict = Depends(get_current_user)):
+    global_db.set_leilao_state(paused=data.paused, interval_seconds=data.interval_seconds,
+                               note_template=data.note_template)
+    if data.paused is False:
+        leilao_service.resume()
+    elif data.paused is True:
+        leilao_service.pause()
+    return {"message": "Estado atualizado"}
+
+
+@app.post("/leilao/resume")
+def resume_leilao(current_user: dict = Depends(get_current_user)):
+    leilao_service.resume()
+    return {"message": "Retomado"}
+
+
+@app.get("/leilao/log")
+def get_leilao_log(current_user: dict = Depends(get_current_user)):
+    return global_db.get_leilao_log(limit=200)
+
+
+@app.get("/leilao/dialogs")
+def get_leilao_dialogs(current_user: dict = Depends(get_current_user)):
+    return {"dialogs": global_db.get_leilao_dialogs()}
+
+
+@app.post("/leilao/dialogs")
+def add_leilao_dialog(data: LeilaoDialogAdd, current_user: dict = Depends(get_current_user)):
+    ok = global_db.add_leilao_dialog(data.sender_id, data.dialog_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Já existe esse par (número, diálogo)")
+    return {"message": "Adicionado"}
+
+
+@app.delete("/leilao/dialogs/{row_id}")
+def remove_leilao_dialog(row_id: int, current_user: dict = Depends(get_current_user)):
+    global_db.remove_leilao_dialog(row_id)
+    return {"message": "Removido"}
+
+# ── Limitadores por número ──
+class SenderLimitsUpdate(BaseModel):
+    limits: Dict[str, Dict[str, Any]]
+
+class SenderUnpause(BaseModel):
+    sender_id: str
+
+@app.post("/senders/limits")
+def save_sender_limits(data: SenderLimitsUpdate, current_user: dict = Depends(get_current_user)):
+    from rate_limit import get_limiter
+    limiter = get_limiter(global_db)
+    saved = {}
+    for sender_id, patch in (data.limits or {}).items():
+        clean = {}
+        for field, cast in (("per_second", float), ("hourly", int), ("daily", int),
+                            ("meta_daily_cap", int), ("auto_pause_failures", int)):
+            if field not in (patch or {}):
+                continue
+            try:
+                value = cast(patch.get(field) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            clean[field] = max(0, value) if field != "per_second" else max(0.0, value)
+        if not clean:
+            continue
+        global_db.update_sender_status(sender_id, (global_db.get_senders()["id_numeros"].get(sender_id) or {}).get("status", "ativado"))
+        global_db.update_sender_daily_limit(sender_id, clean.get("daily", 0))
+        db_patch = {
+            "hourly_limit": clean.get("hourly", 0),
+            "per_second_limit": clean.get("per_second", 0),
+            "meta_daily_cap": clean.get("meta_daily_cap", 0),
+            "auto_pause_failures": clean.get("auto_pause_failures", 5) or 5,
+        }
+        global_db.update_sender_vendeai if hasattr(global_db, "update_sender_vendeai") else None
+        # chatguru db has no update_sender_vendeai; patch columns directly
+        with global_db.lock:
+            conn = global_db._get_conn()
+            cursor = conn.cursor()
+            cols = ", ".join(f"{k} = ?" for k in db_patch)
+            cursor.execute(f"UPDATE senders SET {cols} WHERE id = ?", tuple(db_patch[k] for k in db_patch) + (sender_id,))
+            conn.commit()
+            conn.close()
+        limiter.configure(sender_id, per_second_limit=clean.get("per_second", 0),
+                          hourly_limit=clean.get("hourly", 0), daily_limit=clean.get("daily", 0),
+                          meta_daily_cap=clean.get("meta_daily_cap", 0))
+        saved[sender_id] = clean
+    return {"ok": True, "saved": saved}
+
+@app.post("/senders/unpause")
+def unpause_sender(data: SenderUnpause, current_user: dict = Depends(get_current_user)):
+    from rate_limit import get_limiter
+    get_limiter(global_db).unpause(data.sender_id)
+    return {"ok": True}
+
+@app.get("/senders/quality")
+def senders_quality(current_user: dict = Depends(get_current_user)):
+    from rate_limit import get_limiter
+    limiter = get_limiter(global_db)
+    limiter.seed()
+    senders = global_db.get_senders().get("id_numeros", {})
+    out = {}
+    for sid, info in senders.items():
+        lim = global_db.get_sender_limits(sid)
+        out[sid] = {
+            "ref_numero": info.get("ref_numero"),
+            "quality": limiter.quality(sid),
+            "usage": {"second": limiter.quality(sid)["second"],
+                      "hour": limiter.quality(sid)["hour"],
+                      "day": limiter.quality(sid)["day"]},
+            "limits": lim,
+        }
+    return {"senders": out}
+
+@app.get("/diagnostico")
+def diagnostico(current_user: dict = Depends(get_current_user)):
+    checks = []
+
+    def add(nome, estado, detalhe):
+        checks.append({"nome": nome, "estado": estado, "detalhe": detalhe})
+
+    try:
+        senders = global_db.get_senders().get("id_numeros", {})
+        add("Banco de dados", "ok", f"{len(senders)} número(s) cadastrado(s)")
+    except Exception as e:
+        add("Banco de dados", "erro", str(e))
+        return {"checks": checks, "resumo": {"ok": 0, "aviso": 0, "erro": 1},
+                "pronto_para_disparar": False, "numeros_pausados": []}
+
+    cfg = global_db.get_global_config() or {}
+    if cfg.get("account_id") and cfg.get("token_key"):
+        add("Credenciais ChatGuru", "ok", "account_id e token_key cadastrados")
+    else:
+        add("Credenciais ChatGuru", "erro", "falta account_id ou token_key — va em Configurações")
+
+    senders_ativos = [s for s in senders.values() if s.get("status") == "ativado"]
+    com_dialogo = [s for s in senders_ativos if s.get("dialogos")]
+    if not com_dialogo:
+        add("Números com diálogo", "erro", "nenhum número tem diálogo configurado")
+    else:
+        add("Números com diálogo", "ok", f"{len(com_dialogo)} de {len(senders_ativos)} número(s)")
+
+    # leilão
+    pairs = global_db.get_leilao_dialogs()
+    if pairs:
+        add("Leilão configurado", "ok", f"{len(pairs)} par(es) número→diálogo")
+    else:
+        add("Leilão configurado", "aviso", "nenhum par configurado — webhook do leilão não vai disparar")
+
+    # limites
+    from rate_limit import get_limiter
+    limiter = get_limiter(global_db)
+    limiter.seed()
+    com_limite = 0
+    for s in senders_ativos:
+        lim = global_db.get_sender_limits(s and list(senders.keys())[list(senders.values()).index(s)])
+        if (lim.get("hourly_limit") or lim.get("daily_limit")
+                or lim.get("per_second_limit") or lim.get("meta_daily_cap")):
+            com_limite += 1
+    if senders_ativos and com_limite == 0:
+        add("Limitadores", "aviso", "nenhum número tem teto por hora/dia — risco de ban alto")
+    elif com_limite:
+        add("Limitadores", "ok", f"{com_limite} número(s) com teto")
+
+    # qualidade
+    pausados = [sid for sid, s in senders.items()
+                if limiter.quality(sid).get("paused")]
+    if senders_ativos and len(pausados) >= len(senders_ativos):
+        add("Qualidade dos números", "erro", "TODOS os números pausados — reative em Configurações")
+    elif pausados:
+        add("Qualidade dos números", "aviso", "pausados: " + ", ".join(pausados))
+    else:
+        add("Qualidade dos números", "ok", "nenhum número pausado")
+
+    # dedup
+    cfg = global_db.get_global_config() or {}
+    add("Dedup", "ok", f"ignora reenvio nos últimos {cfg.get('dedup_days', 7)} dia(s)")
+
+    # último disparo
+    st = None
+    for svc in user_services.values():
+        st = svc.get_status()
+        break
+    if st and st.get("total"):
+        add("Último disparo", "ok",
+            f"{st.get('current_sheet')}: {st.get('success')} ok, {st.get('failed')} falha(s), "
+            f"{st.get('skipped')} pulado(s)")
+
+    resumo = {"ok": sum(1 for c in checks if c["estado"] == "ok"),
+              "aviso": sum(1 for c in checks if c["estado"] == "aviso"),
+              "erro": sum(1 for c in checks if c["estado"] == "erro")}
+    return {"checks": checks, "resumo": resumo,
+            "pronto_para_disparar": resumo["erro"] == 0,
+            "numeros_pausados": pausados}
+
+
+class DispatchConfigUpdate(BaseModel):
+    sheet_name: str
+    note_template: Optional[str] = None
+    column_mapping: Dict[str, Any] = {}
+    interval_seconds: Optional[float] = None
+
+
+@app.post("/dispatch/config")
+def save_dispatch_config(data: DispatchConfigUpdate, current_user: dict = Depends(get_current_user)):
+    global_db.set_dispatch_config(
+        data.sheet_name,
+        note_template=data.note_template,
+        column_mapping=data.column_mapping or None,
+        interval_seconds=data.interval_seconds,
+    )
+    return {"ok": True, "config": global_db.get_dispatch_config(data.sheet_name)}
+
+
+@app.get("/dispatch/config")
+def get_dispatch_config_route(sheet_name: str = "", current_user: dict = Depends(get_current_user)):
+    return global_db.get_dispatch_config(sheet_name)
+
+
+@app.get("/dispatch/preview")
+def dispatch_preview(sheet_name: str = "", current_user: dict = Depends(get_current_user)):
+    svc = get_user_service(current_user["email"])
+    if not svc.current_file_path:
+        raise HTTPException(status_code=400, detail="Nenhuma planilha carregada")
+    cfg = global_db.get_dispatch_config(sheet_name) or {}
+    try:
+        df = pd.read_excel(svc.current_file_path, sheet_name=sheet_name)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Não consegui ler a aba: {e}")
+    df.columns = df.columns.str.strip()
+    rows = df.to_dict("records")
+    note_template = cfg.get("note_template") or ""
+    column_mapping = cfg.get("column_mapping") or {}
+    from notes import build_note_text
+    out = []
+    for idx, row in enumerate(rows[:5]):
+        numero = str(row.get("numero") or row.get("Numero") or "").strip()
+        nome = str(row.get("nome") or row.get("Nome") or "").strip()
+        fmt = svc.formatar_numero_completo(numero)
+        note = build_note_text(note_template, row, column_mapping) if note_template else None
+        out.append({
+            "linha": idx + 2,
+            "numero_bruto": numero,
+            "nome": nome,
+            "formatado": fmt,
+            "dedup_hoje": svc.db.is_already_sent_today(numero) if numero else False,
+            "anotacao": note,
+        })
+    return {"aba": sheet_name, "total_linhas": len(rows),
+            "colunas": list(df.columns), "linhas": out,
+            "note_template": note_template, "column_mapping": column_mapping}

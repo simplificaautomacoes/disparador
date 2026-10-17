@@ -6,6 +6,13 @@ import queue
 from itertools import cycle
 from typing import Dict, Any, List
 from database import Database
+from chatguru import (
+    _make_request, formatar_numero_completo, cadastrar_chat,
+    verificar_status_cadastro, enviar_dialogo, adicionar_anotacao,
+    chat_update_context, enviar_mensagem,
+)
+from rate_limit import get_limiter, classify_error
+from notes import build_note_text
 from datetime import datetime, timezone, timedelta
 
 
@@ -35,6 +42,8 @@ class DispatcherService:
         self.db = Database()
         # Ensure migration happens
         self.db.import_from_json()
+        self.cg_cred = None
+        self.dispatch_config = {}
         self.reload_config()
 
     def reload_config(self):
@@ -114,6 +123,10 @@ class DispatcherService:
             self.status["start_time"] = None
             self.status["current_action"] = "Pronto para iniciar"
             self.status["current_sheet"] = sheet_name
+            try:
+                self.dispatch_config = self.db.get_dispatch_config(sheet_name) or {}
+            except Exception:
+                self.dispatch_config = {}
             self._add_log(f"Pronto para iniciar - Aba: {sheet_name}")
         except Exception as e:
             print(f"Error loading data: {e}")
@@ -148,23 +161,31 @@ class DispatcherService:
         active_senders = []
         try:
             self.reload_config()
+            limiter = get_limiter(self.db)
+            limiter.seed()
             for id_remetente, info in self.config["id_numeros"].items():
-                if info["status"] == "ativado":
-                    if info.get("daily_limit", 0) > 0 and info.get(
-                        "today_count", 0
-                    ) >= info.get("daily_limit", 0):
-                        self._add_log(
-                            f"Remetente {info['ref_numero']} pulado: limite diário atingido hoje ({info['today_count']}/{info['daily_limit']})."
-                        )
-                        continue
-                    for id_dialogo in info["dialogos"]:
-                        active_senders.append(
-                            {
-                                "id_remetente": id_remetente,
-                                "ref_numero": info["ref_numero"],
-                                "dialogos": id_dialogo,
-                            }
-                        )
+                if info["status"] != "ativado":
+                    continue
+                limiter.configure(
+                    id_remetente,
+                    per_second_limit=info.get("per_second_limit") or 0,
+                    hourly_limit=info.get("hourly_limit") or 0,
+                    daily_limit=info.get("daily_limit") or 0,
+                    meta_daily_cap=info.get("meta_daily_cap") or 0,
+                )
+                if limiter.check(id_remetente).allowed is False and limiter.check(id_remetente).reason == "por_dia":
+                    self._add_log(
+                        f"Remetente {info['ref_numero']} pulado: limite diário atingido hoje."
+                    )
+                    continue
+                for id_dialogo in info["dialogos"]:
+                    active_senders.append(
+                        {
+                            "id_remetente": id_remetente,
+                            "ref_numero": info["ref_numero"],
+                            "dialogos": id_dialogo,
+                        }
+                    )
         except Exception as e:
             self._add_log(f"Erro ao ler configuração: {e}")
 
@@ -183,10 +204,14 @@ class DispatcherService:
         # ── Lock para contadores thread-safe ──
         lock = threading.Lock()
 
-        # ── Fila compartilhada: contatos são redistribuídos automaticamente quando um remetente atinge o limite ──
-        work_queue = queue.Queue()
-        for i in range(len(self.data)):
-            work_queue.put(i)
+        # ── Fila por remetente + fila de excedente (round-robin de verdade) ──
+        overflow = queue.Queue()
+        sender_queues = {}
+        for idx, sender in enumerate(active_senders):
+            q = queue.Queue()
+            for i in range(idx, len(self.data), num_senders):
+                q.put(i)
+            sender_queues[sender["id_remetente"]] = q
 
         self._add_log("Disparando em paralelo...")
 
@@ -204,22 +229,43 @@ class DispatcherService:
                 if not self.running or self.stop_event.is_set():
                     break
 
-                # Check if daily limit reached
-                if self.db.has_sender_reached_limit(sender_id):
-                    self._add_log(
-                        f"Remetente {sender_ref} atingiu o limite diário de disparos. Interrompendo novos envios deste número hoje."
-                    )
+                limiter = get_limiter(self.db)
+                decision = limiter.check(sender_id)
+                if not decision.allowed:
+                    if decision.wait > 0 and decision.reason == "por_segundo":
+                        time.sleep(min(decision.wait, 5.0))
+                        continue
+                    if sender_id not in getattr(self, "_limited_logged", set()):
+                        self._limited_logged = getattr(self, "_limited_logged", set())
+                        self._limited_logged.add(sender_id)
+                        self._add_log(
+                            f"Remetente {sender_ref} no {decision.reason} — contatos restantes passam para outros números."
+                        )
+                    # devolve o que sobrou
+                    own = sender_queues.get(sender_id)
+                    while own is not None:
+                        try:
+                            overflow.put(own.get_nowait())
+                        except queue.Empty:
+                            break
                     break
 
                 try:
-                    row_idx = work_queue.get_nowait()
-                except queue.Empty:
-                    break  # Fila vazia — todo o trabalho foi distribuído
+                    own_q = sender_queues.get(sender_id)
+                    try:
+                        row_idx = own_q.get_nowait()
+                    except (queue.Empty, AttributeError):
+                        try:
+                            row_idx = overflow.get_nowait()
+                        except queue.Empty:
+                            break
+                except Exception:
+                    break
 
                 row = self.data[row_idx]
                 try:
                     if row.get("_processed"):
-                        work_queue.task_done()
+                        pass
                         continue
 
                     numero = str(row.get("numero") or row.get("Numero") or "").strip()
@@ -231,7 +277,7 @@ class DispatcherService:
                             self.status["failed"] += 1
                             self.status["processed"] += 1
                         row["_processed"] = True
-                        work_queue.task_done()
+                        pass
                         continue
 
                     # Format phone number returns a tuple (numero_12_digitos, numero_13_digitos)
@@ -249,7 +295,7 @@ class DispatcherService:
                         )
                         self._add_log(f"Erro de formatação: {numero}")
                         row["_processed"] = True
-                        work_queue.task_done()
+                        pass
                         time.sleep(0.5)
                         continue
 
@@ -262,7 +308,7 @@ class DispatcherService:
                     else:
                         numero_alvo = numero_12_digitos
 
-                    # Checa duplicados
+                    # Checa duplicados (dedup configurável em dias; padrão 7)
                     if self.db.is_already_sent_today(
                         numero_12_digitos
                     ) or self.db.is_already_sent_today(numero_13_digitos):
@@ -271,7 +317,7 @@ class DispatcherService:
                             self.status["processed"] += 1
                         print(f"Pulado (já enviado hoje): {numero_12_digitos}")
                         row["_processed"] = True
-                        work_queue.task_done()
+                        pass
                         time.sleep(0.5)
                         continue
 
@@ -282,6 +328,16 @@ class DispatcherService:
                     # 1. Tenta enviar direto usando o número alvo da região
                     resp = self.enviar_dialogo(numero_alvo, dialog_id, sender_id)
                     if resp.get("code") == 200:
+                        # anotação (content control): se houver template, grava no chat
+                        note_tpl = (self.dispatch_config or {}).get("note_template")
+                        col_map = (self.dispatch_config or {}).get("column_mapping") or {}
+                        if note_tpl:
+                            try:
+                                note_text = build_note_text(note_tpl, row, col_map)
+                                if note_text.strip():
+                                    self.adicionar_anotacao(numero_alvo, note_text, sender_id)
+                            except Exception as e:
+                                print(f"Erro ao adicionar anotação: {e}")
                         self.db.log_message(
                             numero_alvo,
                             sender_id,
@@ -298,6 +354,7 @@ class DispatcherService:
                                 self.status["sender_stats"][sender_id][
                                     "today_count"
                                 ] += 1
+                        get_limiter(self.db).record(sender_id, ok=True)
                         self._add_structured_log(
                             nome,
                             numero_alvo,
@@ -398,6 +455,7 @@ class DispatcherService:
                                     name=nome,
                                     details="Contato novo criado e mensagem entregue.",
                                 )
+                                get_limiter(self.db).record(sender_id, ok=True)
                                 with lock:
                                     self.status["success"] += 1
                                     if sender_id in self.status["sender_stats"]:
@@ -417,6 +475,9 @@ class DispatcherService:
                                 err_desc = resp_reenvio.get(
                                     "description", "Erro Desconhecido"
                                 )
+                                get_limiter(self.db).record(
+                                    sender_id, ok=False,
+                                    kind=classify_error(resp_reenvio)[0])
                                 self.db.log_message(
                                     numero_final,
                                     sender_id,
@@ -462,6 +523,8 @@ class DispatcherService:
                                 reg_resp.get("description", "Erro"),
                             )
                     else:
+                        get_limiter(self.db).record(sender_id, ok=False,
+                                                    kind=classify_error(resp)[0])
                         self.db.log_message(
                             numero_alvo,
                             sender_id,
@@ -507,10 +570,10 @@ class DispatcherService:
                 row["_processed"] = True
                 with lock:
                     self.status["processed"] += 1
-                work_queue.task_done()
-                time.sleep(
-                    1 * num_senders
-                )  # Mantém a média global de 1 disparo a cada 1s para aprox 1000 disparos em 30 minutos
+                # cadência configurável (padrão 1s global, como antes)
+                cadence = float((self.dispatch_config or {}).get("interval_seconds") or 1.0)
+                if cadence > 0:
+                    time.sleep(cadence / max(1, num_senders))
 
         # ── Lança uma thread por remetente ──
         threads = []
@@ -526,6 +589,20 @@ class DispatcherService:
         # ── Aguarda todas as threads terminarem ──
         for t in threads:
             t.join()
+
+        # ── Sobrou fila? Só se nenhum número tinha folga ──
+        remaining = 0
+        for q in sender_queues.values():
+            remaining += q.qsize()
+        remaining += overflow.qsize()
+        if remaining and not self.paused:
+            with lock:
+                self.status["skipped"] += remaining
+                self.status["processed"] += remaining
+            self._add_log(
+                f"{remaining} contato(s) ficaram de fora porque todos os números atingiram um teto. "
+                "Não é falha — amanhã ou com mais números eles saem."
+            )
 
         if self._thread_epoch == epoch:
             self.running = False
@@ -554,123 +631,43 @@ class DispatcherService:
         return False
 
     def formatar_numero_completo(self, telefone):
-        # Always return a tuple of two strings (numero_12_digitos, numero_13_digitos)
-        # numero_12_digitos: 55 + 2 DDD + 8 digitos (ex: 553199999999) - Ideal para dialog_execute
-        # numero_13_digitos: 55 + 2 DDD + 9 digitos (ex: 5531999999999) - Ideal para chat_add
-        # Se vier como float do Excel (ex: 83986556027.0), converte pra int primeiro
-        try:
-            telefone = int(float(telefone))
-        except (ValueError, TypeError):
-            pass
-        telefone_str = "".join([c for c in str(telefone) if c.isdigit()])
-        if telefone_str.startswith("55") and len(telefone_str) > 11:
-            telefone_str = telefone_str[2:]
-
-        if len(telefone_str) < 10:
-            return False  # Sem DDD
-
-        if len(telefone_str) == 11:
-            # Já possui 9 digitos (ex: 31988887777)
-            ddd = telefone_str[:2]
-            numero_9 = telefone_str[2:]  # 988887777
-            numero_8 = telefone_str[3:]  # 88887777
-            return ("55" + ddd + numero_8, "55" + ddd + numero_9)
-
-        if len(telefone_str) == 10:
-            # Possui 8 digitos (ex: 3188887777)
-            ddd = telefone_str[:2]
-            numero_8 = telefone_str[2:]
-            numero_9 = "9" + numero_8
-            return ("55" + ddd + numero_8, "55" + ddd + numero_9)
-
-        return False
+        return formatar_numero_completo(telefone)
 
     def _make_request(self, endpoint_url, parametros, max_retries=3):
-        import requests
-        import time
-
-        delay = 2
-        for attempt in range(max_retries):
-            try:
-                res = requests.post(endpoint_url, data=parametros, timeout=15)
-                # Se for bloqueio de limite (429 Too Many Requests), faz o backoff
-                if res.status_code == 429:
-                    print(
-                        f"Rate limit API ChatGuru (429). Aguardando {delay}s na tentativa {attempt + 1}..."
-                    )
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-
-                return dict(res.json())
-            except requests.exceptions.RequestException as e:
-                print(
-                    f"Falha de conexão com a API (Tentativa {attempt + 1}/{max_retries}): {e}"
-                )
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    print("Esgotadas as tentativas de requisição.")
-                    return {}
-        return {}
+        return _make_request(endpoint_url, parametros, max_retries=max_retries)
 
     def cadastrar_chat(self, numero_formatado, nome, phone_id, dialog_id=None):
         cred = self._get_credentials()
         if not cred:
             return {}
-
-        nome_str = str(nome).strip()
-        nome_safe = (
-            nome_str
-            if nome_str and nome_str.lower() != "nan"
-            else f"Novo Contato {numero_formatado}"
-        )
-
-        parametros = {
-            "key": cred["token_key"],
-            "account_id": cred["account_id"],
-            "phone_id": phone_id,
-            "action": "chat_add",
-            "name": nome_safe,
-            "chat_number": numero_formatado,
-            "text": " ",
-        }
-        if dialog_id:
-            parametros["dialog_id"] = dialog_id
-
-        endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
-        return self._make_request(endpoint_url, parametros)
+        return cadastrar_chat(cred, numero_formatado, nome, phone_id, dialog_id=dialog_id)
 
     def verificar_status_cadastro(self, chat_add_id, phone_id, chat_number):
-        """Verifica o status do cadastro assíncrono via chat_add_status"""
         cred = self._get_credentials()
         if not cred:
             return {}
-
-        parametros = {
-            "key": cred["token_key"],
-            "account_id": cred["account_id"],
-            "phone_id": phone_id,
-            "action": "chat_add_status",
-            "chat_add_id": chat_add_id,
-            "chat_number": chat_number,
-        }
-        endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
-        return self._make_request(endpoint_url, parametros)
+        return verificar_status_cadastro(cred, chat_add_id, phone_id, chat_number)
 
     def enviar_dialogo(self, numero_formatado, dialogo, phone_id):
         cred = self._get_credentials()
         if not cred:
             return {}
+        return enviar_dialogo(cred, numero_formatado, dialogo, phone_id)
 
-        parametros = {
-            "key": cred["token_key"],
-            "account_id": cred["account_id"],
-            "phone_id": phone_id,
-            "action": "dialog_execute",
-            "chat_number": numero_formatado,
-            "dialog_id": dialogo,
-        }
-        endpoint_url = cred.get("endpoint_url", "https://s17.chatguru.app/api/v1")
-        return self._make_request(endpoint_url, parametros)
+    def adicionar_anotacao(self, numero, note_text, phone_id):
+        cred = self._get_credentials()
+        if not cred:
+            return {}
+        return adicionar_anotacao(cred, numero, note_text, phone_id)
+
+    def chat_update_context(self, phone_id, chat_number, context):
+        cred = self._get_credentials()
+        if not cred:
+            return {}
+        return chat_update_context(cred, phone_id, chat_number, context)
+
+    def enviar_mensagem(self, phone_id, chat_number, text, send_date=None):
+        cred = self._get_credentials()
+        if not cred:
+            return {}
+        return enviar_mensagem(cred, phone_id, chat_number, text, send_date=send_date)
