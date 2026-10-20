@@ -176,6 +176,14 @@ class Database:
                 cursor.execute("SELECT dedup_days FROM global_config LIMIT 1")
             except sqlite3.OperationalError:
                 cursor.execute("ALTER TABLE global_config ADD COLUMN dedup_days INTEGER DEFAULT 7")
+
+            # Pausa automática por qualidade (travar número quando a qualidade
+            # observada cai). Desligada por padrão por enquanto: o usuário pediu
+            # para disparar sem essa barreira até ter o token do Gupshup.
+            try:
+                cursor.execute("SELECT quality_pause_enabled FROM global_config LIMIT 1")
+            except sqlite3.OperationalError:
+                cursor.execute("ALTER TABLE global_config ADD COLUMN quality_pause_enabled INTEGER DEFAULT 0")
             
             # Tabela de Templates Atípicos (diálogo por remetente para o atípico)
             cursor.execute('''
@@ -498,6 +506,24 @@ class Database:
             timestamp = datetime.now().isoformat()
             cursor.execute("INSERT INTO message_log (date, phone, name, sender_id, status, details, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
                            (today, phone, name, sender_id, status, details, timestamp))
+            conn.commit()
+            conn.close()
+
+    def get_quality_pause_enabled(self):
+        cfg = self.get_global_config() or {}
+        try:
+            return bool(cfg.get("quality_pause_enabled"))
+        except Exception:
+            return False
+
+    def set_quality_pause_enabled(self, enabled):
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE global_config SET quality_pause_enabled = ? WHERE id = 1",
+                (1 if enabled else 0,),
+            )
             conn.commit()
             conn.close()
 

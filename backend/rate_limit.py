@@ -303,7 +303,19 @@ class SenderRateLimiter(object):
                 return
             klass = kind if kind in ("block", "reject", "soft", "config") else "soft"
             st.events.append((now, klass))
-            if klass in ("block", "soft"):
+            # Pausa automatica por qualidade: so ativa se a flag global
+            # quality_pause_enabled estiver ligada (default desligada ate termos
+            # a API do Gupshup). Enquanto desligada, o numero nunca e travado
+            # por qualidade — so o limite diario conta.
+            pause_on = True
+            if self.db is not None:
+                getter = getattr(self.db, "get_quality_pause_enabled", None)
+                if callable(getter):
+                    try:
+                        pause_on = bool(getter())
+                    except Exception:
+                        pause_on = False
+            if pause_on and klass in ("block", "soft"):
                 st.streak_fail += 1
                 if self.auto_pause_failures and st.streak_fail >= self.auto_pause_failures:
                     st.paused_reason = (

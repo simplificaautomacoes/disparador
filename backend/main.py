@@ -652,6 +652,18 @@ def unpause_sender(data: SenderUnpause, current_user: dict = Depends(get_current
     get_limiter(global_db).unpause(data.sender_id)
     return {"ok": True}
 
+class QualityPauseToggle(BaseModel):
+    enabled: bool
+
+@app.get("/config/quality-pause")
+def get_quality_pause(current_user: dict = Depends(get_current_user)):
+    return {"enabled": global_db.get_quality_pause_enabled()}
+
+@app.post("/config/quality-pause")
+def set_quality_pause(data: QualityPauseToggle, current_user: dict = Depends(get_current_user)):
+    global_db.set_quality_pause_enabled(data.enabled)
+    return {"enabled": global_db.get_quality_pause_enabled()}
+
 @app.get("/senders/quality")
 def senders_quality(current_user: dict = Depends(get_current_user)):
     from rate_limit import get_limiter

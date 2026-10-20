@@ -36,9 +36,12 @@ const Settings = ({ token }) => {
     const [qualityLoading, setQualityLoading] = useState(false);
     const [qualityMsg, setQualityMsg] = useState(null);
     const [savingLimits, setSavingLimits] = useState(false);
+    const [qualityPauseEnabled, setQualityPauseEnabled] = useState(false);
+    const [qualityPauseSaving, setQualityPauseSaving] = useState(false);
 
     useEffect(() => {
         fetchConfig();
+        axios.get('/api/config/quality-pause').then(r => setQualityPauseEnabled(!!r.data?.enabled)).catch(() => {});
     }, []);
 
     const fetchConfig = async () => {
@@ -150,6 +153,19 @@ const Settings = ({ token }) => {
         } catch (err) {
             console.error("Erro ao excluir remetente:", err);
             alert("Erro ao excluir remetente: " + (err.response?.data?.detail || err.message));
+        }
+    };
+
+    const toggleQualityPause = async () => {
+        setQualityPauseSaving(true);
+        try {
+            const r = await axios.post('/api/config/quality-pause', { enabled: !qualityPauseEnabled });
+            setQualityPauseEnabled(!!r.data?.enabled);
+            setQualityMsg({ type: 'ok', text: qualityPauseEnabled ? 'Pausa por qualidade desativada.' : 'Pausa por qualidade ativada.' });
+        } catch (err) {
+            setQualityMsg({ type: 'erro', text: 'Erro ao alterar a pausa por qualidade.' });
+        } finally {
+            setQualityPauseSaving(false);
         }
     };
 
@@ -461,6 +477,33 @@ const Settings = ({ token }) => {
                         </div>
                     </div>
                 ))}
+            </div>
+
+            {/* ── Pausa automatica por qualidade ── */}
+            <div className="bg-dark-800 rounded-xl border border-dark-700 p-6">
+                <div className="flex items-center justify-between gap-4">
+                    <div>
+                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            Pausa automática por qualidade
+                        </h3>
+                        <p className="text-sm text-gray-400 mt-1 max-w-2xl">
+                            Quando ativada, um número é travado sozinho se a qualidade observada cair.
+                            Desativada por padrão: o disparo só respeita os limites diários/horários/por segundo
+                            que você define abaixo. Reative quando tiver o token do Gupshup para usar a qualidade real da Meta.
+                        </p>
+                    </div>
+                    <button
+                        onClick={toggleQualityPause}
+                        disabled={qualityPauseSaving}
+                        className={'relative w-14 h-7 rounded-full transition-colors disabled:opacity-60 ' +
+                            (qualityPauseEnabled ? 'bg-lime-500' : 'bg-dark-600')}
+                    >
+                        <span
+                            className={'absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ' +
+                                (qualityPauseEnabled ? 'translate-x-8' : 'translate-x-1')}
+                        />
+                    </button>
+                </div>
             </div>
 
             {/* ── Limites e qualidade dos números ─────────────────────── */}
