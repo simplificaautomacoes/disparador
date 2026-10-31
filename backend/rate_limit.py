@@ -71,15 +71,16 @@ def classify_error(resp):
 
 
 class Decision(object):
-    __slots__ = ("allowed", "reason", "wait", "used", "limit", "detail")
+    __slots__ = ("allowed", "reason", "wait", "used", "limit", "detail", "day_used")
 
-    def __init__(self, allowed, reason="ok", wait=0.0, used=0, limit=0, detail=""):
+    def __init__(self, allowed, reason="ok", wait=0.0, used=0, limit=0, detail="", day_used=0):
         self.allowed = allowed
         self.reason = reason
         self.wait = wait
         self.used = used
         self.limit = limit
         self.detail = detail
+        self.day_used = day_used
 
     def as_dict(self):
         return {"allowed": self.allowed, "reason": self.reason,
@@ -264,10 +265,24 @@ class SenderRateLimiter(object):
                                 wait=max(0.0, oldest + 3600 - now))
 
             daily = st.daily
-            if daily and st.day >= daily:
-                return Decision(False, "por_dia", used=st.day, limit=daily)
+            effective_day = st.day
+            if daily:
+                # Fonte da verdade: o banco. O contador em memória (st.day) pode
+                # ter zerado depois de um restart no meio do dia e deixaria o
+                # número disparar um lote inteiro a mais. Usamos o máximo entre
+                # o contador em memória e o que está realmente gravado no banco.
+                if self.db is not None:
+                    getter = getattr(self.db, "get_sender_today_count", None)
+                    if callable(getter):
+                        try:
+                            effective_day = max(effective_day, int(getter(sender_id) or 0))
+                        except Exception:
+                            pass
+                if effective_day >= daily:
+                    return Decision(False, "por_dia", used=effective_day, limit=daily)
 
-            return Decision(True, "ok", used=len(st.window))
+            return Decision(True, "ok", used=len(st.window),
+                            limit=daily, day_used=effective_day)
 
     def wait(self, sender_id, stop_event=None, now=None, max_wait=MAX_WAIT):
         deadline = (now or self._now()) + max_wait

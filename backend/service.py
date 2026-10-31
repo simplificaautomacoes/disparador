@@ -178,14 +178,19 @@ class DispatcherService:
                         f"Remetente {info['ref_numero']} pulado: limite diário atingido hoje."
                     )
                     continue
-                for id_dialogo in info["dialogos"]:
-                    active_senders.append(
-                        {
-                            "id_remetente": id_remetente,
-                            "ref_numero": info["ref_numero"],
-                            "dialogos": id_dialogo,
-                        }
-                    )
+                # Um remetente por entrada (mesmo com vários diálogos). Antes,
+                # cada diálogo virava uma thread separada competindo pelo MESMO
+                # contador de limite — isso deixava o número estourar o teto.
+                dialogos = info.get("dialogos") or []
+                if not dialogos:
+                    continue
+                active_senders.append(
+                    {
+                        "id_remetente": id_remetente,
+                        "ref_numero": info["ref_numero"],
+                        "dialogos": list(dialogos),
+                    }
+                )
         except Exception as e:
             self._add_log(f"Erro ao ler configuração: {e}")
 
@@ -222,12 +227,17 @@ class DispatcherService:
                 time.sleep(worker_idx * 1.5)
 
             sender_id = sender_config["id_remetente"]
-            dialog_id = sender_config["dialogos"]
             sender_ref = sender_config["ref_numero"]
+            dialogos = sender_config.get("dialogos") or []
+            # Round-robin entre os diálogos deste número (sem abrir N threads).
+            # Se vier um único diálogo, o cycle devolve sempre ele.
+            dialogo_cycle = cycle(dialogos) if dialogos else cycle([None])
 
             while True:
                 if not self.running or self.stop_event.is_set():
                     break
+
+                dialog_id = next(dialogo_cycle)
 
                 limiter = get_limiter(self.db)
                 decision = limiter.check(sender_id)

@@ -429,6 +429,25 @@ class Database:
             
             return today_count >= daily_limit
 
+    def get_sender_today_count(self, sender_id):
+        """Contagem REAL de envios com sucesso hoje (fonte da verdade).
+
+        O limitador em memória pode divergir do banco depois de um restart no
+        meio do dia (o contador zera e o número dispara um lote a mais). Este
+        método consulta o banco, que é a fonte confiável do "já enviado hoje".
+        """
+        with self.lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            today = datetime.now(BRT).strftime("%Y-%m-%d")
+            cursor.execute(
+                "SELECT count(*) FROM message_log WHERE sender_id = ? AND status = 'success' AND date = ?",
+                (str(sender_id), today),
+            )
+            n = cursor.fetchone()[0]
+            conn.close()
+            return int(n or 0)
+
     def delete_sender(self, sender_id):
         with self.lock:
             conn = self._get_conn()
