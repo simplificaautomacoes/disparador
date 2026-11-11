@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from database import Database
 from rate_limit import get_limiter, classify_error
+from chatguru import _make_request
 
 
 # Fuso horário de Brasília (UTC-3)
@@ -62,26 +63,7 @@ class AtypicalService:
         return config
 
     def _make_request(self, endpoint_url, parametros, max_retries=3):
-        delay = 2
-        for attempt in range(max_retries):
-            try:
-                res = requests.post(endpoint_url, data=parametros, timeout=15)
-                if res.status_code == 429:
-                    print(f"[Atípico] Rate limit (429). Aguardando {delay}s...")
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-                return dict(res.json())
-            except requests.exceptions.RequestException as e:
-                print(
-                    f"[Atípico] Falha de conexão (Tentativa {attempt + 1}/{max_retries}): {e}"
-                )
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    return {"error": str(e)}
-        return {}
+        return _make_request(endpoint_url, parametros, max_retries=max_retries)
 
     def formatar_numero_completo(self, telefone):
         try:

@@ -6,12 +6,19 @@ diagnóstico) usem o mesmo caminho sem reimplementar o cadastro assíncrono.
 """
 import requests
 import time
+import re
 from datetime import datetime, timezone, timedelta
 
 BRT = timezone(timedelta(hours=-3))
 
 
 def _make_request(endpoint_url, parametros, max_retries=3):
+    parametros = dict(parametros)
+    for field in ("phone_id", "dialog_id", "account_id", "key"):
+        if isinstance(parametros.get(field), str):
+            parametros[field] = parametros[field].strip()
+    # Timeout não comprova que a API deixou de executar a ação.
+    side_effect = parametros.get("action") in ("dialog_execute", "message_send", "chat_add")
     delay = 2
     for attempt in range(max_retries):
         try:
@@ -22,10 +29,18 @@ def _make_request(endpoint_url, parametros, max_retries=3):
                 delay *= 2
                 continue
             try:
-                return dict(res.json())
+                payload = dict(res.json())
+                description = payload.get("description") or ""
+                if re.search(r"chat n.o encontrado", description, re.IGNORECASE):
+                    payload["description"] = "Chat não encontrado."
+                return payload
             except Exception:
-                return {}
+                return {"code": 599, "description": "Resposta inválida da API",
+                        "outcome_unknown": side_effect}
         except requests.exceptions.RequestException as e:
+            if side_effect:
+                return {"code": 599, "description": "Conexão interrompida; confirme o envio no ChatGuru antes de tentar novamente",
+                        "outcome_unknown": True}
             print(f"Falha de conexão com a API (Tentativa {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(delay)

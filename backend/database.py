@@ -83,6 +83,10 @@ class Database:
                 )
             ''')
             cursor.execute("INSERT OR IGNORE INTO leilao_state (id) VALUES (1)")
+            cursor.execute('''CREATE TABLE IF NOT EXISTS leilao_phone_claims (
+                phone TEXT PRIMARY KEY,
+                log_id INTEGER NOT NULL
+            )''')
 
             # Log de leads do leilão
             cursor.execute('''
@@ -108,6 +112,8 @@ class Database:
             ''')
 
             # Config de anotação do disparo principal por planilha
+            if "auction_id" not in {row[1] for row in cursor.execute("PRAGMA table_info(lead_esteira_log)")}:
+                cursor.execute("ALTER TABLE lead_esteira_log ADD COLUMN auction_id TEXT NOT NULL DEFAULT 'padrao'")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS dispatch_sheet_config (
                     sheet_name TEXT PRIMARY KEY,
@@ -681,6 +687,96 @@ class Database:
         return out
 
     # ── Leilão (Esteira) ──
+    def esteira_receive(self, phone, lead, status, details=None):
+        """Reserva o lead antes do envio, inclusive entre processos distintos."""
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                lid = lead.get("lead_id")
+                auction_id = lead.get("leilao_id") or "padrao"
+                if lid:
+                    row = conn.execute(
+                        "SELECT * FROM lead_esteira_log WHERE lead_id = ? AND auction_id = ? ORDER BY id LIMIT 1",
+                        (lid, auction_id)).fetchone()
+                    if row:
+                        return dict(row), True
+                cursor = conn.execute('''INSERT INTO lead_esteira_log
+                    (phone, name, cpf, campaign, status, details, payload_json,
+                     source, created_at, lead_id, auction_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                    (phone, lead.get("nome"), lead.get("cpf"), lead.get("origem"),
+                     status, details, json.dumps({"lead": lead}, ensure_ascii=False),
+                     "webhook", datetime.now().isoformat(), lid, auction_id))
+                row = conn.execute("SELECT * FROM lead_esteira_log WHERE id = ?",
+                                   (cursor.lastrowid,)).fetchone()
+                conn.commit()
+                return dict(row), False
+            finally:
+                conn.close()
+
+    def esteira_claim(self, log_id, phone_key):
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                changed = conn.execute(
+                    "UPDATE lead_esteira_log SET status = 'processing', details = NULL "
+                    "WHERE id = ? AND status = 'queued'", (log_id,)).rowcount
+                if not changed:
+                    return False
+                conn.execute("INSERT INTO leilao_phone_claims (phone, log_id) VALUES (?, ?)",
+                             (phone_key, log_id))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+            finally:
+                conn.close()
+
+    def esteira_release(self, log_id):
+        with self.lock:
+            conn = self._get_conn()
+            conn.execute("DELETE FROM leilao_phone_claims WHERE log_id = ?", (log_id,))
+            conn.commit()
+            conn.close()
+
+    def esteira_get(self, log_id):
+        with self.lock:
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM lead_esteira_log WHERE id = ?", (log_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+
+    def esteira_set_sender(self, log_id, sender_id, dialog_id):
+        with self.lock:
+            conn = self._get_conn()
+            conn.execute("UPDATE lead_esteira_log SET sender_id = ?, dialog_id = ? WHERE id = ?",
+                         (sender_id, dialog_id, log_id))
+            conn.commit()
+            conn.close()
+
+    def esteira_retry(self, log_ids, auction_id="padrao", confirmed_not_sent=False):
+        """Somente falhas confirmadas; mantém o ID e o payload originais."""
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                ids = list(dict.fromkeys(log_ids))
+                changed = []
+                for log_id in ids:
+                    if conn.execute(
+                        "UPDATE lead_esteira_log SET status = 'queued', "
+                        "details = 'reprocessamento solicitado', sent_at = NULL "
+                        "WHERE id = ? AND (status = 'failed' OR (status = 'unknown' AND ?)) AND auction_id = ?", (log_id, int(confirmed_not_sent), auction_id)).rowcount:
+                        conn.execute("DELETE FROM leilao_phone_claims WHERE log_id = ?", (log_id,))
+                        changed.append(log_id)
+                conn.commit()
+                return changed
+            finally:
+                conn.close()
+
     def get_leilao_state(self):
         with self.lock:
             conn = self._get_conn()
@@ -714,7 +810,7 @@ class Database:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT ld.id, ld.sender_id, ld.dialog_id, ld.created_at, s.ref_numero
+                SELECT ld.id, ld.sender_id, ld.dialog_id, ld.created_at, s.ref_numero, s.status AS sender_status
                 FROM leilao_dialogs ld JOIN senders s ON s.id = ld.sender_id
                 ORDER BY ld.sender_id, ld.id
             """)
@@ -786,22 +882,22 @@ class Database:
             conn.close()
             return dict(row) if row else None
 
-    def esteira_get_queued(self, limit=50):
+    def esteira_get_queued(self, limit=50, auction_id="padrao"):
         with self.lock:
             conn = self._get_conn()
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM lead_esteira_log WHERE status = 'queued' ORDER BY id LIMIT ?", (limit,))
+            cursor.execute("SELECT * FROM lead_esteira_log WHERE status = 'queued' AND auction_id = ? ORDER BY id LIMIT ?", (auction_id, limit))
             rows = [dict(r) for r in cursor.fetchall()]
             conn.close()
             return rows
 
-    def get_leilao_log(self, limit=100):
+    def get_leilao_log(self, limit=100, auction_id="padrao"):
         with self.lock:
             conn = self._get_conn()
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM lead_esteira_log ORDER BY id DESC LIMIT ?", (limit,))
+            cursor.execute("SELECT * FROM lead_esteira_log WHERE auction_id = ? ORDER BY id DESC LIMIT ?", (auction_id, limit))
             rows = [dict(r) for r in cursor.fetchall()]
             conn.close()
             return rows

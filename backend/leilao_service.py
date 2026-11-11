@@ -10,8 +10,6 @@ para o leilão também.
 import json
 import threading
 import time
-import queue
-from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -22,16 +20,7 @@ from chatguru import (
     enviar_dialogo, adicionar_anotacao,
 )
 from rate_limit import get_limiter, classify_error
-from notes import build_note_text
-
-BRT = None
-try:
-    from database import BRT as _BRT
-    BRT = _BRT
-except Exception:
-    from datetime import timezone, timedelta
-    BRT = timezone(timedelta(hours=-3))
-
+from auction_profiles import AuctionProfiles, profile_for, render_lead
 
 class LeilaoLead(BaseModel):
     """Lead do sistema de Leilao (contrato igual ao do app VendeAI)."""
@@ -51,33 +40,7 @@ class LeilaoLead(BaseModel):
     tipo_empregador: Optional[str] = None
     cnaes_empregador: Optional[str] = None
 
-    class Config:
-        extra = "allow"   # o sistema externo pode mandar campos a mais
-
-
-LEAD_VARS = ["lead_id", "cpf", "nome", "primeiro_nome", "matricula",
-             "valor_num", "prazo_desejado_parcelas", "origem",
-             "tempo_vinculo_meses", "margem_disponivel", "celulares",
-             "qualifica", "cnpj_empregador", "nome_empresa",
-             "tipo_empregador", "cnaes_empregador"]
-
-
-def _lead_view(raw):
-    raw = raw or {}
-    view = {k: ("" if raw.get(k) is None else str(raw.get(k))) for k in LEAD_VARS if k != "primeiro_nome"}
-    nome = view.get("nome", "")
-    view["primeiro_nome"] = nome.split(" ")[0] if nome else ""
-    return view
-
-
-def _render_lead_note(template, raw):
-    if not template:
-        return None
-    view = _lead_view(raw)
-    out = template
-    for k, v in view.items():
-        out = out.replace("{" + k + "}", v)
-    return out
+    model_config = {"extra": "allow"}
 
 
 def _leilao_phones(celulares):
@@ -136,6 +99,9 @@ def _next_leilao_pair(db, preferred_sender_id=None):
         pairs = [p for p in pairs if str(p.get("sender_id")) == str(preferred_sender_id)] or pairs
     if not pairs:
         return None
+    pairs = [p for p in pairs if p.get("sender_status", "ativado") == "ativado"]
+    if not pairs:
+        return None
     with _LEILAO_RR_LOCK:
         p = pairs[_LEILAO_RR_INDEX % len(pairs)]
         _LEILAO_RR_INDEX += 1
@@ -145,7 +111,7 @@ def _next_leilao_pair(db, preferred_sender_id=None):
 _LEILAO_RR_INDEX = 0
 _LEILAO_RR_LOCK = threading.Lock()
 _DRAIN_LOCK = threading.Lock()
-_DRAINING = [False]
+_LEILAO_SEND_LOCK = threading.RLock()
 
 
 class LeilaoService:
@@ -153,13 +119,14 @@ class LeilaoService:
         if db is None:
             db = Database()
         self.db = db
+        self.profiles = AuctionProfiles(db)
 
     def _cred(self):
         return self.db.get_global_config()
 
-    def _throttle(self):
+    def _throttle(self, auction_id="padrao"):
         try:
-            st = self.db.get_leilao_state()
+            st = self.profiles.state(auction_id)
             interval = float(st.get("interval_seconds") or 0)
         except Exception:
             interval = 0
@@ -172,85 +139,62 @@ class LeilaoService:
                 time.sleep(wait)
             _LEILAO_LAST_SEND[0] = time.time()
 
-    def receive_lead(self, lead_raw, svc=None):
-        """Webhook: recebe o lead e dispara (ou enfileira se pausado)."""
-        lead = lead_raw or {}
-        # Idempotência por lead_id
-        lid = lead.get("lead_id")
-        if lid:
-            existing = self.db.esteira_get_by_lead_id(lid)
-            if existing:
-                return {"status": existing.get("status"), "id": existing.get("id"),
-                        "phone": existing.get("phone"), "duplicate_lead_id": True}
-
+    def receive_lead(self, lead_raw, svc=None, pair_override=None):
+        """Persiste primeiro, para uma repetição do webhook não disparar de novo."""
+        lead = dict(lead_raw or {})
+        auction_id = profile_for(lead)
+        state = self.profiles.state(auction_id)
+        lead["leilao_id"] = auction_id
         q = lead.get("qualifica")
-        qualified = q in (True, "true", "True", "TRUE", 1, "1") if not isinstance(q, bool) else bool(q)
+        qualified = q in (True, "true", "True", "TRUE", 1, "1")
+        phone = next(("+" + fmt[0] for candidate in _leilao_phones(lead.get("celulares"))
+                      if (fmt := formatar_numero_completo(candidate))), None)
+        status, details = "queued", None
         if not qualified:
-            log_id = self.db.esteira_log(
-                phone=";".join(_leilao_phones(lead.get("celulares")))[:60] or None,
-                name=lead.get("nome"), cpf=lead.get("cpf"), campaign=lead.get("origem"),
-                status="skipped", details="filtro qualifica=false",
-                payload_json=json.dumps(lead, ensure_ascii=False),
-                source="webhook", lead_id=lid)
-            return {"status": "skipped", "id": log_id, "reason": "qualifica=false"}
+            status, details = "skipped", "filtro qualifica=false"
+        elif not phone:
+            status, details = "failed", "invalid_phone"
+        row, duplicate = self.db.esteira_receive(phone, lead, status, details)
+        if duplicate:
+            return {"status": row["status"], "id": row["id"], "phone": row["phone"],
+                    "duplicate_lead_id": True}
+        if status != "queued" or state.get("paused"):
+            return {"status": status, "id": row["id"], "phone": phone}
+        return self._send_now(phone, lead, lead.get("lead_id"), row["id"], pair_override)
 
-        normalized = None
-        for candidate in _leilao_phones(lead.get("celulares")):
-            # usa a MESMA regra do disparo principal (12 e 13 digitos)
-            fmt = formatar_numero_completo(candidate)
-            if fmt:
-                normalized = "+" + fmt[0]
-                break
-        if not normalized:
-            log_id = self.db.esteira_log(
-                phone=str(lead.get("celulares"))[:60], name=lead.get("nome"),
-                cpf=lead.get("cpf"), campaign=lead.get("origem"),
-                status="failed", details="invalid_phone",
-                payload_json=json.dumps(lead, ensure_ascii=False),
-                source="webhook", lead_id=lid)
+    def _send_now(self, phone, lead, lid, log_id, pair_override=None):
+        fmt = formatar_numero_completo(phone)
+        if not fmt:
+            self.db.esteira_mark(log_id, "failed", "invalid_phone")
             return {"status": "failed", "id": log_id}
-
-        if _was_sent(self.db, normalized):
-            log_id = self.db.esteira_log(
-                phone=normalized, name=lead.get("nome"), cpf=lead.get("cpf"),
-                campaign=lead.get("origem"), status="skipped",
-                details="dedup: recently sent",
-                payload_json=json.dumps(lead, ensure_ascii=False),
-                source="webhook", lead_id=lid)
-            return {"status": "skipped", "id": log_id, "phone": normalized}
-
+        if not self.db.esteira_claim(log_id, fmt[0]):
+            row = self.db.esteira_get(log_id)
+            return {"status": row["status"], "id": log_id, "busy": True}
         try:
-            paused = bool(self.db.get_leilao_state().get("paused"))
-        except Exception:
-            paused = False
-        if paused:
-            log_id = self.db.esteira_log(
-                phone=normalized, name=lead.get("nome"), cpf=lead.get("cpf"),
-                campaign=lead.get("origem"), status="queued",
-                details="paused: aguardando retomada",
-                payload_json=json.dumps({"lead": lead}, ensure_ascii=False),
-                source="webhook", lead_id=lid)
-            return {"status": "queued", "id": log_id, "phone": normalized}
+            if _was_sent(self.db, phone):
+                self.db.esteira_mark(log_id, "skipped", "dedup: recently sent")
+                return {"status": "skipped", "id": log_id, "phone": phone}
+            # Seleção do remetente, consulta do limite e registro são serializados.
+            with _LEILAO_SEND_LOCK:
+                return self._dispatch_claimed(phone, lead, lid, log_id, pair_override)
+        except Exception as exc:
+            # O processo pode ter falhado depois de enviar. Não reenviar automaticamente.
+            self.db.esteira_mark(log_id, "unknown", str(exc)[:2000])
+            return {"status": "unknown", "id": log_id, "error": str(exc)}
+        finally:
+            row = self.db.esteira_get(log_id)
+            if row and row["status"] not in ("processing", "unknown"):
+                self.db.esteira_release(log_id)
 
-        return self._send_now(normalized, lead, lid)
-
-    def _send_now(self, phone, lead, lid):
+    def _dispatch_claimed(self, phone, lead, lid, log_id, pair_override=None):
         cred = self._cred()
         if not cred or not cred.get("account_id") or not cred.get("token_key"):
-            log_id = self.db.esteira_log(phone=phone, name=lead.get("nome"),
-                                         cpf=lead.get("cpf"), campaign=lead.get("origem"),
-                                         status="failed", details="missing_credentials",
-                                         payload_json=json.dumps({"lead": lead}, ensure_ascii=False),
-                                         source="webhook", lead_id=lid)
+            self.db.esteira_mark(log_id, "failed", "missing_credentials")
             return {"status": "failed", "id": log_id, "phone": phone}
 
-        pair = _next_leilao_pair(self.db)
+        pair = pair_override or _next_leilao_pair(self.db)
         if not pair:
-            log_id = self.db.esteira_log(phone=phone, name=lead.get("nome"),
-                                         cpf=lead.get("cpf"), campaign=lead.get("origem"),
-                                         status="failed", details="no_leilao_dialog: configure em Leilão",
-                                         payload_json=json.dumps({"lead": lead}, ensure_ascii=False),
-                                         source="webhook", lead_id=lid)
+            self.db.esteira_mark(log_id, "failed", "no_leilao_dialog: configure em Leilão")
             return {"status": "failed", "id": log_id, "phone": phone, "error": "no_leilao_dialog"}
 
         sender_id = pair["sender_id"]
@@ -265,25 +209,27 @@ class LeilaoService:
                           daily_limit=self._sender_limit(sender_id, "daily_limit"),
                           meta_daily_cap=self._sender_limit(sender_id, "meta_daily_cap"))
         ok_slot, decision = self._wait_slot(sender_id)
+        if not ok_slot and not pair_override:
+            tried = {sender_id}
+            for _ in range(len(self.db.get_leilao_dialogs())):
+                candidate = _next_leilao_pair(self.db)
+                if not candidate or candidate["sender_id"] in tried:
+                    continue
+                tried.add(candidate["sender_id"])
+                candidate_id = candidate["sender_id"]
+                limiter.configure(candidate_id, **{field: self._sender_limit(candidate_id, field)
+                    for field in ("per_second_limit", "hourly_limit", "daily_limit", "meta_daily_cap")})
+                ok_slot, decision = self._wait_slot(candidate_id)
+                if ok_slot:
+                    sender_id, dialog_id = candidate_id, candidate["dialog_id"]
+                    break
         if not ok_slot:
-            log_id = self.db.esteira_log(phone=phone, name=lead.get("nome"),
-                                         cpf=lead.get("cpf"), campaign=lead.get("origem"),
-                                         sender_id=sender_id, dialog_id=dialog_id,
-                                         status="failed",
-                                         details="limit_hit: todos os numeros no %s" % (decision.reason if decision else "teto"),
-                                         payload_json=json.dumps({"lead": lead}, ensure_ascii=False),
-                                         source="webhook", lead_id=lid)
+            self.db.esteira_mark(log_id, "failed", "limit_hit: %s" % (decision.reason if decision else "teto"))
             return {"status": "failed", "id": log_id, "phone": phone, "error": "limit_hit"}
 
-        log_id = self.db.esteira_log(phone=phone, name=lead.get("nome"),
-                                     cpf=lead.get("cpf"), product="clt",
-                                     campaign=lead.get("origem") or "leilao",
-                                     sender_id=sender_id, dialog_id=dialog_id,
-                                     status="queued",
-                                     payload_json=json.dumps({"lead": lead}, ensure_ascii=False),
-                                     source="webhook", lead_id=lid)
+        self.db.esteira_set_sender(log_id, sender_id, dialog_id)
 
-        self._throttle()
+        self._throttle(profile_for(lead))
         try:
             formatado = formatar_numero_completo(phone.replace("+", ""))
             if not formatado:
@@ -292,52 +238,77 @@ class LeilaoService:
             ddd = int(num_12[2:4])
             numero_alvo = num_13 if 11 <= ddd <= 29 else num_12
 
-            note_text = None
-            try:
-                st = self.db.get_leilao_state()
-                note_text = _render_lead_note(st.get("note_template"), lead)
-            except Exception:
-                note_text = None
+            st = self.profiles.state(profile_for(lead))
+            note_text = render_lead(st.get("note_template"), lead)
 
-            # chat_add (registra o contato) — idempotente: se já existe, dialog_execute funciona direto
-            resp = enviar_dialogo(cred, numero_alvo, dialog_id, sender_id)
-            if resp.get("code") == 400 and "Chat não encontrado" in (resp.get("description") or ""):
-                reg = cadastrar_chat(cred, numero_alvo, lead.get("nome") or "", sender_id, dialog_id=dialog_id)
-                chat_add_id = reg.get("chat_add_id")
-                if chat_add_id:
-                    for _ in range(45):
-                        st_req = verificar_status_cadastro(cred, chat_add_id, sender_id, numero_alvo)
-                        if st_req.get("chat_add_status") in ("success", "done"):
-                            time.sleep(1)
-                            break
-                        if st_req.get("chat_add_status") in ("error", "invalid"):
-                            break
-                        time.sleep(1)
+            alternate = num_12 if numero_alvo == num_13 else num_13
+            # A IA do diálogo precisa encontrar a anotação antes de iniciar o atendimento.
+            resp = adicionar_anotacao(cred, numero_alvo, note_text, sender_id) if note_text else {"code": 200}
+            registered = False
+            if self._missing_chat(resp):
+                numero_alvo, resp = self._register_contact(cred, numero_alvo, alternate, lead, sender_id)
+                registered = True
+                if numero_alvo and note_text:
+                    resp = adicionar_anotacao(cred, numero_alvo, note_text, sender_id)
+            if resp.get("code") in (200, 201):
                 resp = enviar_dialogo(cred, numero_alvo, dialog_id, sender_id)
+                if self._missing_chat(resp) and not registered:
+                    numero_alvo, resp = self._register_contact(cred, numero_alvo, alternate, lead, sender_id)
+                    if numero_alvo:
+                        resp = adicionar_anotacao(cred, numero_alvo, note_text, sender_id) if note_text else {"code": 200}
+                        if resp.get("code") in (200, 201):
+                            resp = enviar_dialogo(cred, numero_alvo, dialog_id, sender_id)
+                            if self._missing_chat(resp):
+                                # Uma rejeição explícita não executou o diálogo; pode tentar o outro formato.
+                                fallback = num_12 if numero_alvo == num_13 else num_13
+                                note_resp = adicionar_anotacao(cred, fallback, note_text, sender_id) if note_text else {"code": 200}
+                                if note_resp.get("code") in (200, 201):
+                                    numero_alvo = fallback
+                                    resp = enviar_dialogo(cred, numero_alvo, dialog_id, sender_id)
 
             ok = resp.get("code") == 200
-            if note_text:
-                try:
-                    adicionar_anotacao(cred, numero_alvo, note_text, sender_id)
-                except Exception:
-                    pass
             limiter.record(sender_id, ok=ok,
                            kind=None if ok else classify_error(resp)[0])
             if ok:
-                self.db.esteira_mark(log_id, "sent")
                 self.db.log_message(numero_alvo, sender_id, "success", name=lead.get("nome"),
                                     details="Leilão ChatGuru")
+                self.db.esteira_mark(log_id, "sent")
                 return {"status": "sent", "id": log_id, "phone": phone, "sender_id": sender_id}
-            self.db.esteira_mark(log_id, "failed", str(resp)[:2000])
-            self.db.log_message(numero_alvo, sender_id, "failed", name=lead.get("nome"),
+            outcome = "unknown" if resp.get("outcome_unknown") else "failed"
+            self.db.esteira_mark(log_id, outcome, str(resp)[:2000])
+            self.db.log_message(numero_alvo or phone, sender_id, "failed", name=lead.get("nome"),
                                 details=str(resp)[:500])
-            return {"status": "failed", "id": log_id, "phone": phone, "sender_id": sender_id,
+            return {"status": outcome, "id": log_id, "phone": phone, "sender_id": sender_id,
                     "error": resp.get("description")}
         except Exception as e:
             limiter.record(sender_id, ok=False, kind="soft")
-            self.db.esteira_mark(log_id, "failed", str(e)[:2000])
+            self.db.esteira_mark(log_id, "unknown", str(e)[:2000])
             self.db.log_message(numero_alvo, sender_id, "failed", name=lead.get("nome"), details=str(e)[:500])
-            return {"status": "failed", "id": log_id, "phone": phone, "error": str(e)}
+            return {"status": "unknown", "id": log_id, "phone": phone, "error": str(e)}
+
+    @staticmethod
+    def _missing_chat(resp):
+        import re
+        return resp.get("code") == 400 and bool(re.search(r"chat n.o encontrado", resp.get("description") or "", re.IGNORECASE))
+
+    def _register_contact(self, cred, phone, alternate, lead, sender_id):
+        response = {}
+        for candidate in dict.fromkeys([phone, alternate]):
+            response = cadastrar_chat(cred, candidate, lead.get("nome") or "", sender_id)
+            request_id = response.get("chat_add_id")
+            if request_id:
+                for _ in range(45):
+                    response = verificar_status_cadastro(cred, request_id, sender_id, candidate)
+                    if response.get("chat_add_status") in ("success", "done"):
+                        time.sleep(1)
+                        return candidate, {"code": 200}
+                    if response.get("chat_add_status") in ("error", "invalid"):
+                        break
+                    time.sleep(1)
+                break
+            if response.get("outcome_unknown"):
+                break
+        return None, {"code": 400, "description": "Cadastro não concluído: " + str(response)}
 
     def _sender_limit(self, sender_id, field):
         try:
@@ -361,38 +332,42 @@ class LeilaoService:
             return False, d
 
     def drain_queued(self):
-        if _DRAINING[0]:
+        if not _DRAIN_LOCK.acquire(blocking=False):
             return
-        _DRAINING[0] = True
         try:
             while True:
-                try:
-                    if bool(self.db.get_leilao_state().get("paused")):
-                        break
-                except Exception:
-                    break
-                batch = self.db.esteira_get_queued(limit=50)
-                if not batch:
-                    break
-                for row in batch:
-                    try:
-                        if bool(self.db.get_leilao_state().get("paused")):
-                            break
-                    except Exception:
-                        break
-                    phone = row.get("phone")
-                    if not phone or _was_sent(self.db, phone):
-                        self.db.esteira_mark(row["id"], "skipped",
-                                             "drenagem: dedup no momento do envio")
+                progressed = False
+                for profile in self.profiles.list():
+                    key = profile["id"]
+                    if self.profiles.state(key).get("paused"):
                         continue
-                    raw = {}
-                    try:
-                        raw = json.loads(row.get("payload_json") or "{}").get("lead", {}) or {}
-                    except Exception:
-                        raw = {}
-                    self._send_now(phone, raw or {"nome": row.get("name")}, row.get("lead_id"))
+                    for row in self.db.esteira_get_queued(limit=50, auction_id=key):
+                        if self.profiles.state(key).get("paused"):
+                            break
+                        try:
+                            payload = json.loads(row.get("payload_json") or "{}")
+                            raw = payload.get("lead", payload) or {}
+                        except (ValueError, TypeError):
+                            self.db.esteira_mark(row["id"], "failed", "Payload salvo inválido")
+                            progressed = True
+                            continue
+                        raw["leilao_id"] = key
+                        result = self._send_now(row.get("phone"), raw, row.get("lead_id"), row["id"])
+                        progressed = progressed or not result.get("busy")
+                if not progressed:
+                    break
         finally:
-            _DRAINING[0] = False
+            _DRAIN_LOCK.release()
+
+    def start_drain(self):
+        threading.Thread(target=self.drain_queued, daemon=True).start()
+
+    def retry_failed(self, log_ids, auction_id="padrao", confirmed_not_sent=False):
+        state = self.profiles.state(auction_id)
+        ids = self.db.esteira_retry(log_ids, auction_id, confirmed_not_sent)
+        if ids and not state.get("paused"):
+            threading.Thread(target=self.drain_queued, daemon=True).start()
+        return {"queued": len(ids), "ids": ids}
 
     def pause(self):
         self.db.set_leilao_state(paused=True)

@@ -320,8 +320,8 @@ def update_config(config: ConfigUpdate, current_user: dict = Depends(get_current
 
 @app.post("/senders")
 def add_sender(sender: dict, current_user: dict = Depends(get_current_user)):
-    id_sender = sender.get("id")
-    ref = sender.get("ref_numero")
+    id_sender = str(sender.get("id") or "").strip()
+    ref = str(sender.get("ref_numero") or "").strip()
     if not id_sender or not ref:
         raise HTTPException(status_code=400, detail="ID e Referência são obrigatórios")
     
@@ -342,6 +342,26 @@ def delete_sender(sender_id: str, current_user: dict = Depends(get_current_user)
 @app.get("/history")
 def get_history(current_user: dict = Depends(get_current_user)):
     return global_db.get_history_stats()
+
+
+class SenderTestRequest(BaseModel):
+    sender_id: str
+    phone: str
+
+
+@app.post("/senders/test")
+def test_sender(data: SenderTestRequest, current_user: dict = Depends(get_current_admin_user)):
+    """Teste pontual autenticado, com os limites e a proteção contra duplicação."""
+    import uuid
+    senders = global_db.get_senders().get("id_numeros", {})
+    sender_id = next((sid for sid in senders if sid.strip() == data.sender_id.strip()), None)
+    sender = senders.get(sender_id) or {}
+    if sender.get("status") != "ativado" or not sender.get("dialogos"):
+        raise HTTPException(status_code=400, detail="Número desativado ou sem diálogo")
+    return leilao_service.receive_lead(
+        {"lead_id": "teste-" + uuid.uuid4().hex, "nome": "Teste do disparador",
+         "celulares": [data.phone], "qualifica": True, "origem": "Teste manual"},
+        pair_override={"sender_id": sender_id, "dialog_id": sender["dialogos"][0]})
 @app.get("/daily_failures")
 def get_daily_failures(current_user: dict = Depends(get_current_user)):
     return global_db.get_daily_failures()
@@ -539,41 +559,73 @@ def get_atypical_senders(current_user: dict = Depends(get_current_user)):
 @app.post("/webhook/leilao")
 def webhook_leilao(lead: LeilaoLead):
     """Webhook do sistema externo (Leilão Ao Vivo). Sem auth — idempotente por lead_id."""
-    return leilao_service.receive_lead(lead.model_dump())
+    try:
+        return leilao_service.receive_lead(lead.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/webhook/leilao/{auction_id}")
+def webhook_leilao_profile(auction_id: str, lead: LeilaoLead):
+    try:
+        return leilao_service.receive_lead(dict(lead.model_dump(), leilao_id=auction_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/leilao/profiles")
+def list_auction_profiles(current_user: dict = Depends(get_current_user)):
+    return leilao_service.profiles.list()
+
+
+class AuctionCreate(BaseModel):
+    id: str
+    name: str
+
+
+@app.post("/leilao/profiles")
+def create_auction_profile(data: AuctionCreate, current_user: dict = Depends(get_current_user)):
+    import sqlite3
+    try:
+        return leilao_service.profiles.create(data.id, data.name)
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/leilao/state")
-def get_leilao_state(current_user: dict = Depends(get_current_user)):
-    st = global_db.get_leilao_state()
+def get_leilao_state(auction_id: str = "padrao", current_user: dict = Depends(get_current_user)):
+    st = leilao_service.profiles.state(auction_id)
     return {
+        **st,
         "paused": bool(st.get("paused")),
         "interval_seconds": st.get("interval_seconds", 1.0),
         "note_template": st.get("note_template", ""),
         "dialogs": global_db.get_leilao_dialogs(),
-        "webhook_url": "/api/webhook/leilao",
+        "webhook_url": st["webhook_url"],
     }
 
 
 @app.post("/leilao/state")
-def update_leilao_state(data: LeilaoStateUpdate, current_user: dict = Depends(get_current_user)):
-    global_db.set_leilao_state(paused=data.paused, interval_seconds=data.interval_seconds,
-                               note_template=data.note_template)
+def update_leilao_state(data: LeilaoStateUpdate, auction_id: str = "padrao", current_user: dict = Depends(get_current_user)):
+    try:
+        leilao_service.profiles.update(auction_id, **data.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if data.paused is False:
-        leilao_service.resume()
-    elif data.paused is True:
-        leilao_service.pause()
+        leilao_service.start_drain()
     return {"message": "Estado atualizado"}
 
 
 @app.post("/leilao/resume")
-def resume_leilao(current_user: dict = Depends(get_current_user)):
-    leilao_service.resume()
+def resume_leilao(auction_id: str = "padrao", current_user: dict = Depends(get_current_user)):
+    leilao_service.profiles.update(auction_id, paused=False)
+    leilao_service.start_drain()
     return {"message": "Retomado"}
 
 
 @app.get("/leilao/log")
-def get_leilao_log(current_user: dict = Depends(get_current_user)):
-    return global_db.get_leilao_log(limit=200)
+def get_leilao_log(auction_id: str = "padrao", current_user: dict = Depends(get_current_user)):
+    return global_db.get_leilao_log(limit=200, auction_id=auction_id)
 
 
 @app.get("/leilao/dialogs")
@@ -587,6 +639,18 @@ def add_leilao_dialog(data: LeilaoDialogAdd, current_user: dict = Depends(get_cu
     if not ok:
         raise HTTPException(status_code=400, detail="Já existe esse par (número, diálogo)")
     return {"message": "Adicionado"}
+
+
+class LeilaoRetryRequest(BaseModel):
+    ids: List[int]
+    confirmed_not_sent: bool = False
+
+
+@app.post("/leilao/retry")
+def retry_leilao(data: LeilaoRetryRequest, auction_id: str = "padrao", current_user: dict = Depends(get_current_user)):
+    if not data.ids or len(data.ids) > 200:
+        raise HTTPException(status_code=400, detail="Selecione entre 1 e 200 falhas")
+    return leilao_service.retry_failed(data.ids, auction_id, data.confirmed_not_sent)
 
 
 @app.delete("/leilao/dialogs/{row_id}")

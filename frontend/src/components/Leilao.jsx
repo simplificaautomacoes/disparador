@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
+import AuctionSelector from './AuctionSelector';
 import {
     Pause, Play, Copy, Check, Plus, Trash2, RefreshCw, Webhook,
     MessageSquare, ListChecks, StickyNote, Info, Clock
@@ -17,6 +18,8 @@ const STATUS_MAP = {
     queued: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: 'Na fila' },
     skipped: { bg: 'bg-gray-500/20', text: 'text-gray-400', label: 'Pulado' },
     failed: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Falha' },
+    processing: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'Enviando' },
+    unknown: { bg: 'bg-orange-500/20', text: 'text-orange-400', label: 'Confirmar no ChatGuru' },
 };
 
 const formatDate = (iso) => {
@@ -28,7 +31,7 @@ const formatDate = (iso) => {
     }
 };
 
-const Leilao = () => {
+const LeilaoContent = ({ auctionId }) => {
     const [state, setState] = useState(null);
     const [senders, setSenders] = useState([]);
     const [log, setLog] = useState([]);
@@ -59,7 +62,7 @@ const Leilao = () => {
 
     const fetchState = useCallback(async () => {
         try {
-            const res = await axios.get('/api/leilao/state');
+            const res = await axios.get(`/api/leilao/state?auction_id=${auctionId}`);
             const d = res.data || {};
             setState(d);
             setIntervalSeconds(String(d.interval_seconds ?? 1));
@@ -69,7 +72,7 @@ const Leilao = () => {
         } catch (err) {
             console.error(err);
         }
-    }, []);
+    }, [auctionId]);
 
     const fetchSenders = useCallback(async () => {
         try {
@@ -87,12 +90,26 @@ const Leilao = () => {
 
     const fetchLog = useCallback(async () => {
         try {
-            const res = await axios.get('/api/leilao/log');
+            const res = await axios.get(`/api/leilao/log?auction_id=${auctionId}`);
             setLog(Array.isArray(res.data) ? res.data : []);
         } catch (err) {
             console.error(err);
         }
-    }, []);
+    }, [auctionId]);
+
+    const retryFailed = async (ids, confirmedNotSent = false) => {
+        if (!ids.length || busy) return;
+        setBusy(true);
+        try {
+            const { data } = await axios.post(`/api/leilao/retry?auction_id=${auctionId}`, { ids, confirmed_not_sent: confirmedNotSent });
+            notify('ok', `${data.queued} falha(s) na fila para reprocessar${state?.paused ? '. Retome o leilão para enviar.' : '.'}`);
+            await fetchLog();
+        } catch (err) {
+            notify('erro', err.response?.data?.detail || 'Erro ao reprocessar falhas.');
+        } finally {
+            setBusy(false);
+        }
+    };
 
     useEffect(() => {
         (async () => {
@@ -128,10 +145,10 @@ const Leilao = () => {
         const next = !state.paused;
         setBusy(true);
         try {
-            await axios.post('/api/leilao/state', { paused: next });
+            await axios.post(`/api/leilao/state?auction_id=${auctionId}`, { paused: next });
             if (!next) {
                 // garante a drenagem da fila ao retomar
-                try { await axios.post('/api/leilao/resume'); } catch { /* opcional */ }
+                try { await axios.post(`/api/leilao/resume?auction_id=${auctionId}`); } catch { /* opcional */ }
             }
             await fetchState();
             notify('ok', next ? 'Disparo pausado.' : 'Retomado! Enviando a fila.');
@@ -151,7 +168,7 @@ const Leilao = () => {
         }
         setBusy(true);
         try {
-            await axios.post('/api/leilao/state', { interval_seconds: value });
+            await axios.post(`/api/leilao/state?auction_id=${auctionId}`, { interval_seconds: value });
             await fetchState();
             notify('ok', `Intervalo salvo: ${value}s entre cada envio.`);
         } catch (err) {
@@ -165,7 +182,7 @@ const Leilao = () => {
     const saveNote = async () => {
         setBusy(true);
         try {
-            await axios.post('/api/leilao/state', { note_template: noteTemplate });
+            await axios.post(`/api/leilao/state?auction_id=${auctionId}`, { note_template: noteTemplate });
             await fetchState();
             notify('ok', 'Anotação automática salva.');
         } catch (err) {
@@ -178,13 +195,19 @@ const Leilao = () => {
 
     const insertVar = (v) => {
         const value = noteTemplate || '';
-        const pos = noteCaret.current ?? value.length;
-        const next = value.slice(0, pos) + v + value.slice(pos);
+        const pos = noteRef.current?.selectionStart ?? noteCaret.current ?? value.length;
+        const end = noteRef.current?.selectionEnd ?? pos;
+        const next = value.slice(0, pos) + v + value.slice(end);
         setNoteTemplate(next);
         noteCaret.current = pos + v.length;
+        requestAnimationFrame(() => {
+            noteRef.current?.focus();
+            noteRef.current?.setSelectionRange(pos + v.length, pos + v.length);
+        });
     };
 
     const trackCaret = (el) => {
+        el = el?.target || el;
         if (!el) return;
         noteCaret.current = el.selectionStart ?? (noteTemplate || '').length;
     };
@@ -336,7 +359,7 @@ const Leilao = () => {
                             className="w-full bg-dark-800 border border-dark-700 text-white p-3 rounded-lg focus:outline-none focus:border-lime-500 font-mono text-sm resize-y"
                         />
                         <div className="flex flex-wrap gap-1.5 mt-3">
-                            {NOTE_VARS.map((v) => (
+                            {(state?.available_vars?.map(key => `{${key}}`) || NOTE_VARS).map((v) => (
                                 <button
                                     key={v}
                                     type="button"
@@ -470,6 +493,11 @@ const Leilao = () => {
                         <ListChecks size={20} className="text-lime-500" /> Log de leads
                     </h3>
                     <button
+                        onClick={() => retryFailed(log.filter(row => row.status === 'failed').map(row => row.id))}
+                        disabled={busy || !log.some(row => row.status === 'failed')}
+                        className="px-4 py-2 bg-lime-500 text-dark-900 rounded-lg text-sm font-bold disabled:opacity-50"
+                    >Reprocessar falhas exibidas</button>
+                    <button
                         onClick={fetchLog}
                         className="flex items-center gap-2 px-4 py-2 bg-dark-900 hover:bg-dark-700 border border-dark-700 text-gray-300 hover:text-white rounded-lg text-sm font-medium transition-colors"
                     >
@@ -488,12 +516,13 @@ const Leilao = () => {
                                 <th className="px-6 py-4">Número</th>
                                 <th className="px-6 py-4">Diálogo</th>
                                 <th className="px-6 py-4">Detalhe</th>
+                                <th className="px-6 py-4">Ação</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-dark-700">
                             {log.length === 0 && (
                                 <tr>
-                                    <td colSpan={7} className="px-6 py-8 text-center text-gray-500 italic">
+                                    <td colSpan={8} className="px-6 py-8 text-center text-gray-500 italic">
                                         Nenhum lead recebido ainda.
                                     </td>
                                 </tr>
@@ -516,6 +545,15 @@ const Leilao = () => {
                                         <td className="px-6 py-4 text-gray-500 text-sm max-w-xs truncate" title={row.details || ''}>
                                             {row.details || '-'}
                                         </td>
+                                        <td className="px-6 py-4">
+                                            {row.status === 'failed' && (
+                                                <button disabled={busy} onClick={() => retryFailed([row.id])}
+                                                    className="text-lime-400 text-sm font-bold disabled:opacity-50">Reprocessar</button>
+                                            )}
+                                            {row.status === 'unknown' && <button disabled={busy}
+                                                onClick={() => { if (confirm('Confira o atendimento no ChatGuru. Você confirma que a mensagem NÃO foi enviada? Reprocessar uma mensagem já enviada causará duplicidade.')) retryFailed([row.id], true); }}
+                                                className="text-orange-400 text-sm font-bold disabled:opacity-50">Confirmar e reprocessar</button>}
+                                        </td>
                                     </tr>
                                 );
                             })}
@@ -527,4 +565,8 @@ const Leilao = () => {
     );
 };
 
+const Leilao = () => {
+    const [auctionId, setAuctionId] = useState('padrao');
+    return <><AuctionSelector value={auctionId} onChange={setAuctionId} /><LeilaoContent key={auctionId} auctionId={auctionId} /></>;
+};
 export default Leilao;
